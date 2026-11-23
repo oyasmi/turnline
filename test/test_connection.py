@@ -103,7 +103,7 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await created.json())["id"], CONVERSATION)
                         self.assertEqual((await client.get(f"{PREFIX}/conversations/{CONVERSATION}/items")).status, 200)
                         self.assertEqual((await client.get(f"{PREFIX}/conversations/{OTHER}/items")).status, 404)
-                        self.assertEqual((await client.post("/demo/v1/responses", json={}, headers=headers)).status, 405)
+                        self.assertEqual((await client.post("/demo/v1/responses", json={}, headers=headers)).status, 404)
                         response = await client.post(
                             PREFIX + "/responses",
                             headers=headers,

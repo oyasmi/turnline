@@ -268,7 +268,7 @@ def create_app(tts_threads=2, *, origin=None, socket_path=None, state_dir=None, 
     app.router.add_get("/speech/info", speech_info)
     app.router.add_post("/speech/prepare", prepare)
     app.router.add_post("/speech/synthesize", generate)
-    app.router.add_static("/", PUBLIC)
+    app.router.add_static("/assets/", PUBLIC)
 
     async def headers(request, response):
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -276,6 +276,8 @@ def create_app(tts_threads=2, *, origin=None, socket_path=None, state_dir=None, 
         response.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
         if request.path == "/" or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        if request.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-cache"
         if request.path == "/":
             site = browser_origin(request, origin)
             if site:

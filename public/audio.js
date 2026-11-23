@@ -127,7 +127,7 @@ export async function captureMicrophone(onFrame) {
   let context;
   try {
     context = new AudioContext({ sampleRate: 16_000, latencyHint: 'interactive' });
-    await context.audioWorklet.addModule('./mic-worklet.js');
+    await context.audioWorklet.addModule(new URL('./mic-worklet.js', import.meta.url));
     await context.resume();
     const source = context.createMediaStreamSource(stream);
     const worklet = new AudioWorkletNode(context, 'microphone-frames', { channelCount: 1 });
