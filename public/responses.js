@@ -1,4 +1,19 @@
-export const CALL_INSTRUCTIONS = '我们正在语音通话。请直接说结论，通常一两句。需要澄清时只问一个问题。长任务简短确认，完成后汇报结果。用自然的口语，把代码、链接、路径和长日志留给屏幕。';
+export const CALL_INSTRUCTIONS = `你正在和用户实时通话。用用户当前使用的语言，像电话里说话一样回答。
+
+第一句给最有用的信息：结论、下一步，或者已确认的状态。把第一句写成能独立听懂的短句，用句号或问号收尾。平常一到三句，说完把话权交给用户。对方追问时再展开。
+
+使用可直接朗读的纯文本和自然标点。把条目说成短句，把复杂细节压缩成口头摘要。保留影响理解的数字、单位、版本和专名。遇到长命令、路径、链接或代码，先解释用途，再问用户是否要切到文字查看。
+
+能直接回答就直接回答。必须核实或执行时，只说有用的进展。区分准备做、正在做和已完成。耗时工作适合交给后台时，可以安排可追踪的任务，确认实际创建后再告诉用户。需要澄清时，一次只问一个能决定下一步的问题。
+
+用户可能在任意一句中间插话。优先回应他刚说的话。收到播报停点时，以最后完整播完的一句为准。用户说“接着说”，就从那里往下讲；用户改了方向，就跟随新方向。如实说明已经执行的操作。
+
+语音转写里的名字、数字或命令有歧义，而且猜错会影响结果时，先核对关键字。`;
+
+export function isBackchannel(text) {
+  const syllables = text.replace(/[\s，。,.、…]/gu, '');
+  return /^(?:[嗯唔哦噢喔啊]{1,3}|(?:うー?ん){1,3})$/u.test(syllables);
+}
 
 export async function* readEvents(stream) {
   if (!stream) throw new Error('后端没有返回响应流。');
@@ -44,11 +59,17 @@ export function backendUrl(value, origin) {
 }
 
 async function request(url, key, body, signal) {
-  const headers = { 'content-type': 'application/json' };
+  const headers = {};
   if (key) headers.authorization = 'Bearer ' + key;
+  const options = { headers, signal, redirect: 'error' };
+  if (body !== undefined) {
+    headers['content-type'] = 'application/json';
+    options.method = 'POST';
+    options.body = JSON.stringify(body);
+  }
   let response;
   try {
-    response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal, redirect: 'error' });
+    response = await fetch(url, options);
   } catch (error) {
     if (signal.aborted) throw error;
     throw new Error('无法连接后端。请检查 Base URL、网络和后端 CORS 设置。');
@@ -67,11 +88,21 @@ export async function createConversation(settings, signal) {
   return id;
 }
 
-export async function openResponse(settings, { conversation, messages, text, interruption }, signal) {
+export async function listConversationItems(settings, conversation, after, signal) {
+  const query = new URLSearchParams({ order: 'asc', limit: '50' });
+  if (after) query.set('after', after);
+  const response = await request(settings.url + '/conversations/' + encodeURIComponent(conversation) + '/items?' + query,
+    settings.key, undefined, signal);
+  const page = await response.json();
+  if (!Array.isArray(page.data) || typeof page.has_more !== 'boolean') throw new Error('会话消息格式无效。');
+  return page;
+}
+
+export async function openResponse(settings, { conversation, messages, text, voice, interruption }, signal) {
   const body = {
     model: settings.model,
     stream: true,
-    instructions: [CALL_INSTRUCTIONS, settings.instructions, interruption].filter(Boolean).join('\n'),
+    ...(voice ? { instructions: [CALL_INSTRUCTIONS, settings.instructions, interruption].filter(Boolean).join('\n') } : {}),
     ...(conversation ? { conversation, input: text } : { store: false, input: messages }),
   };
   const response = await request(settings.url + '/responses', settings.key, body, signal);

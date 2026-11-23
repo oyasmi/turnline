@@ -168,6 +168,7 @@ export class SpeechPlayer {
     this.phrases = new Set();
     this.generation = 0;
     this.nextStart = 0;
+    this.paused = false;
   }
 
   resume() {
@@ -176,12 +177,32 @@ export class SpeechPlayer {
   }
 
   get active() { return this.queue.length > 0 || this.sources.size > 0 || this.generating === this.generation; }
-  get playing() { return this.sources.size > 0; }
+  get playing() { return !this.paused && this.sources.size > 0; }
 
   enqueue(entry) {
     this.queue.push(entry);
     this.onState();
     void this.pump();
+  }
+
+  pause() {
+    this.paused = true;
+    for (const source of this.sources) clearTimeout(source.timer);
+    const suspended = this.context.suspend();
+    this.onState();
+    return suspended;
+  }
+
+  unpause() {
+    if (!this.paused) return;
+    this.paused = false;
+    const generation = this.generation;
+    void this.context.resume().then(() => {
+      if (this.paused || this.generation !== generation) return;
+      for (const source of this.sources) this.armStart(source);
+      this.onState();
+      void this.pump();
+    }).catch(this.onError);
   }
 
   stop() {
@@ -197,11 +218,12 @@ export class SpeechPlayer {
     this.sources.clear();
     this.phrases.clear();
     this.nextStart = 0;
+    this.unpause();
     this.onState();
   }
 
   async pump() {
-    if (this.generating !== undefined || this.phrases.size >= 2 || !this.queue.length) return;
+    if (this.paused || this.generating !== undefined || this.phrases.size >= 2 || !this.queue.length) return;
     const generation = this.generation;
     this.generating = generation;
     const entry = this.queue.shift();
@@ -212,7 +234,7 @@ export class SpeechPlayer {
     try {
       for await (const audio of this.engine.synthesize(entry.text, entry.voice, controller.signal)) {
         if (this.generation !== generation) return;
-        if (!phrase.started) entry.onPcm(clock(), audio.timing);
+        if (!phrase.started) entry.onPcm?.(clock(), audio.timing);
         this.schedule(phrase, audio);
         phrase.started = true;
       }
@@ -231,7 +253,17 @@ export class SpeechPlayer {
 
   finishPhrase(phrase) {
     if (!phrase.finished || phrase.pending || !this.phrases.delete(phrase)) return;
-    if (phrase.complete) phrase.entry.onEnd();
+    if (phrase.complete) phrase.entry.onEnd?.();
+  }
+
+  armStart(record) {
+    if (!record.onStart || this.paused || this.context.state !== 'running') return;
+    clearTimeout(record.timer);
+    record.timer = setTimeout(() => {
+      const onStart = record.onStart;
+      record.onStart = undefined;
+      onStart(clock());
+    }, Math.max(0, (record.start - this.context.currentTime) * 1000));
   }
 
   schedule(phrase, { samples, sampleRate }) {
@@ -243,17 +275,15 @@ export class SpeechPlayer {
     source.connect(context.destination);
     const start = Math.max(context.currentTime + 0.012, this.nextStart);
     const gap = (start - this.nextStart) * 1000;
-    if (this.nextStart && gap > 30) phrase.entry.onGap(gap);
+    if (this.nextStart && gap > 30) phrase.entry.onGap?.(gap);
     this.nextStart = start + buffer.duration;
-    const generation = this.generation;
-    const timer = phrase.started ? undefined : setTimeout(() => {
-      if (this.generation === generation) phrase.entry.onStart(clock());
-    }, Math.max(0, (start - context.currentTime) * 1000));
-    const record = { source, timer };
+    const record = { source, start, onStart: phrase.started ? undefined : phrase.entry.onStart };
     this.sources.add(record);
     phrase.pending++;
     this.onState();
     source.onended = () => {
+      clearTimeout(record.timer);
+      record.onStart?.(clock());
       this.sources.delete(record);
       source.disconnect();
       phrase.pending--;
@@ -262,5 +292,6 @@ export class SpeechPlayer {
       void this.pump();
     };
     source.start(start);
+    this.armStart(record);
   }
 }

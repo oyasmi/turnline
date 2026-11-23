@@ -62,12 +62,14 @@
         <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
         <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
         <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
-        <div><dt>插话事件处理</dt><dd id="metric-interruption">—</dd></div>
+        <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
       </dl>
       <details class="speech-timing">
         <summary>语音链路明细</summary>
         <dl class="metrics">
+          <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
           <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
+          <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
           <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
           <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
           <div><dt>首段文本到浏览器收到 PCM</dt><dd id="metric-pcm">—</dd></div>
@@ -103,7 +105,7 @@
             <option value="live">分句即时播报</option>
           </select>
         </label>
-        <label>补充通话指令<textarea id="instructions" rows="2" maxlength="3000" placeholder="例如：用中文回答，语速放慢一点。"></textarea></label>
+        <label>补充通话指令<textarea id="instructions" rows="2" maxlength="3000" placeholder="例如：每次只说一个步骤。"></textarea></label>
         <div class="field-pair">
           <label>断句停顿
             <select id="silence">

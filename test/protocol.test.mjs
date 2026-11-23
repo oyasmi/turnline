@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { pcmChunks } from '../public/audio.js';
-import { backendUrl, readEvents, splitSpeech } from '../public/responses.js';
+import { updateSpeech } from '../public/conversation-updates.js';
+import { backendUrl, isBackchannel, readEvents, splitSpeech } from '../public/responses.js';
 
 test('reads an SSE stream with split CRLF, split UTF-8, comments and multiline data', async () => {
   const bytes = new TextEncoder().encode(': keepalive\r\ndata: {"type":"delta",\r\ndata: "delta":"你好"}\r\n\r\ndata: [DONE]\n\n');
@@ -46,4 +47,14 @@ test('uses the supplied Responses base URL and keeps credentials out of it', () 
   assert.equal(backendUrl('', 'http://localhost:4173'), 'http://localhost:4173/demo/v1');
   assert.throws(() => backendUrl('https://name:secret@example.com/v1'));
   assert.throws(() => backendUrl('http://example.com/v1'));
+});
+
+test('acknowledgement filtering leaves questions, confirmations and corrections actionable', () => {
+  for (const text of ['嗯。', '嗯，嗯。', '哦。', 'うん。']) assert.equal(isBackchannel(text), true, text);
+  for (const text of ['嗯？', '嗯，等一下。', 'うん、待って。', '好。', '取消。']) assert.equal(isBackchannel(text), false, text);
+});
+
+test('speaks the result of a task report and keeps its internal identifier on screen', () => {
+  assert.equal(updateSpeech('**任务 `check-1` 汇报**\n检查完成。详细结果已记录。'), '检查完成。');
+  assert.equal(updateSpeech('**✅ 任务 `check-1` 已完成**\n- 历时：两秒'), '任务 已完成');
 });

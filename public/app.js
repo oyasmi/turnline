@@ -1,5 +1,6 @@
 import { captureMicrophone, clock, RecognizerConnection, speechServer, SpeechPlayer } from './audio.js';
-import { backendUrl, createConversation, openResponse, splitSpeech } from './responses.js';
+import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
+import { backendUrl, createConversation, isBackchannel, openResponse, splitSpeech } from './responses.js';
 
 const $ = id => document.getElementById(id);
 const metrics = {
@@ -7,6 +8,8 @@ const metrics = {
   text: $('metric-text'),
   audio: $('metric-audio'),
   interruption: $('metric-interruption'),
+  backendQueue: $('metric-backend-queue'),
+  textWait: $('metric-text-wait'),
   speakable: $('metric-speakable'),
   queue: $('metric-queue'),
   synthesis: $('metric-synthesis'),
@@ -21,8 +24,11 @@ let settings = {
   context: 'history', reading: 'confirmed', silence: 0.5, duplex: false, voice: 0,
 };
 let conversation;
+let updates;
+let pendingUpdates = [];
 let call;
 let turn;
+let barge;
 let muted = false;
 let micEpoch = 0;
 let micBlocked = true;
@@ -101,6 +107,7 @@ function render() {
   $('mute').setAttribute('aria-pressed', String(muted));
   $('mute').disabled = !call?.ready;
   $('interrupt').disabled = !busy;
+  if (pendingUpdates.length) queueMicrotask(speakNextUpdate);
 }
 
 function updateDuration() {
@@ -114,6 +121,7 @@ function updateListening(force = false) {
   micBlocked = blocked;
   recognizing = false;
   speakingUser = false;
+  releaseBarge();
   micEpoch++;
   endpointAt = undefined;
   if (call?.ready) asr.reset(micEpoch, settings.silence);
@@ -156,12 +164,13 @@ async function startCall() {
 function hangUp() {
   const ended = call;
   call = undefined;
+  pendingUpdates = [];
   ended?.controller.abort();
   ended?.microphone?.stop();
   asr.close();
   muted = false;
-  updateListening(true);
   interrupt();
+  updateListening(true);
   updateDuration();
   render();
 }
@@ -174,7 +183,7 @@ function addMessage(role, text = '') {
   const flag = document.createElement('span');
   row.className = 'entry ' + role;
   who.className = 'who';
-  who.textContent = role === 'user' ? '你' : '助手';
+  who.textContent = role === 'user' ? '你' : role === 'update' ? '会话更新' : '助手';
   content.className = 'content';
   content.textContent = text;
   flag.className = 'flag';
@@ -200,10 +209,38 @@ function rememberAnswer(current, content) {
   }
 }
 
-function interrupt(note = true, detectedAt) {
+function showConversationUpdate(text, speak) {
+  addMessage('update', text);
+  if (!speak || !call?.ready) return;
+  const summary = updateSpeech(text);
+  if (summary) {
+    pendingUpdates.push(summary);
+    if (pendingUpdates.length > 5) pendingUpdates.shift();
+    speakNextUpdate();
+  }
+}
+
+function speakNextUpdate() {
+  if (!call?.ready || speakingUser || recognizing || player.active || (turn && !turn.ended)) return;
+  const text = pendingUpdates.shift();
+  if (text) {
+    turn = undefined;
+    player.enqueue({ text, voice: settings.voice });
+  }
+}
+
+function releaseBarge() {
+  if (!barge) return;
+  barge = undefined;
+  player.unpause();
+}
+
+function interrupt(note = true) {
   const previous = turn;
   const hadOutput = Boolean(previous && (!previous.ended || player.active));
+  barge = undefined;
   if (previous) {
+    if (!previous.ended) updates?.interrupted();
     previous.ended = true;
     previous.controller.abort();
   }
@@ -221,7 +258,6 @@ function interrupt(note = true, detectedAt) {
         : '上一轮语音回复被打断时，还没有完整播完一句。';
     }
   }
-  if (detectedAt !== undefined && hadOutput) showMetric('interruption', clock() - detectedAt);
   render();
 }
 
@@ -236,13 +272,22 @@ function onRecognition(event) {
     return;
   }
   if (event.type === 'error') {
-    if (call && !micBlocked) showError(event.message);
+    if (call && !micBlocked) {
+      releaseBarge();
+      showError(event.message);
+    }
     return;
   }
   if (!call || micBlocked || event.epoch !== micEpoch) return;
   if (event.type === 'speech-start') {
     speakingUser = true;
-    if (turn && (!turn.ended || player.active)) interrupt(true, clock());
+    if (!barge && (player.active || (turn && !turn.ended))) {
+      const candidate = { started: clock(), duringPlayback: player.playing };
+      barge = candidate;
+      void player.pause().then(() => {
+        if (barge === candidate) showMetric('interruption', clock() - candidate.started);
+      }).catch(error => showError(error.message));
+    }
   } else if (event.type === 'speech-end') {
     speakingUser = false;
     recognizing = true;
@@ -250,17 +295,22 @@ function onRecognition(event) {
   } else if (event.type === 'transcript') {
     speakingUser = false;
     recognizing = false;
-    if (event.text) void send(event.text, { endpointAt: endpointAt ?? clock(), asrMs: event.asrMs });
+    const text = event.text.trim();
+    if (text && !(barge?.duringPlayback && isBackchannel(text))) {
+      void send(text, { endpointAt: endpointAt ?? clock(), asrMs: event.asrMs });
+    } else {
+      releaseBarge();
+    }
   }
   render();
 }
 
-function enqueue(current, phrase) {
-  if (!call?.ready || !ttsReady || current.controller.signal.aborted) return;
-  current.voice = true;
+function enqueue(current, phrase, firstTextAt) {
+  if (!current.voice || !call?.ready || current.controller.signal.aborted) return;
   if (current.firstSpeakable === undefined) {
     current.firstSpeakable = clock();
     showMetric('speakable', current.firstSpeakable - current.sentAt);
+    if (firstTextAt !== undefined) showMetric('textWait', current.firstSpeakable - firstTextAt);
   }
   player.enqueue({
     text: phrase,
@@ -298,8 +348,9 @@ function itemEntry(current, key) {
 
 function updateText(current, entry) {
   if (!entry.text.trim()) return;
+  entry.firstTextAt ??= clock();
   if (!current.firstText) {
-    current.firstText = clock();
+    current.firstText = entry.firstTextAt;
     showMetric('text', current.firstText - current.sentAt);
   }
   entry.display ??= addMessage('assistant');
@@ -316,11 +367,12 @@ function drain(current, entry, finish) {
   entry.pendingSpeech = split.rest;
   for (const phrase of split.phrases) {
     entry.spoken = true;
-    enqueue(current, phrase);
+    enqueue(current, phrase, entry.firstTextAt);
   }
 }
 
 function outputItem(current, key, item) {
+  updates?.track(item.id);
   if (item.type !== 'message' || item.role !== 'assistant') return;
   const entry = itemEntry(current, key);
   if (entry.done) return;
@@ -335,7 +387,12 @@ function outputItem(current, key, item) {
 
 function processEvent(current, event) {
   const key = event.output_index ?? event.item?.id ?? event.item_id;
-  if (event.type === 'response.output_item.added' && event.item.type === 'message' && event.item.role === 'assistant') {
+  if (event.type === 'response.queued' || (event.type === 'response.created' && event.response?.status === 'queued')) {
+    current.backendQueuedAt ??= clock();
+  } else if (event.type === 'response.in_progress' || (event.type === 'response.created' && event.response?.status === 'in_progress')) {
+    showMetric('backendQueue', current.backendQueuedAt === undefined ? 0 : clock() - current.backendQueuedAt);
+  } else if (event.type === 'response.output_item.added' && event.item.type === 'message' && event.item.role === 'assistant') {
+    updates?.track(event.item.id);
     itemEntry(current, key).phase = event.item.phase;
   } else if (event.type === 'response.output_text.delta') {
     const entry = itemEntry(current, key);
@@ -382,9 +439,14 @@ async function send(text, timing) {
       const id = await createConversation(current.settings, signal);
       if (signal.aborted) return;
       conversation = id;
+      if (current.settings.model === 'pipiclaw') {
+        updates = new ConversationUpdates(current.settings, id, () => !turn || turn.ended, showConversationUpdate);
+      }
     }
     current.sentAt = clock();
-    const events = await openResponse(current.settings, { conversation, messages: history.slice(-16), text, interruption: previousInterruption }, signal);
+    const events = await openResponse(current.settings, {
+      conversation, messages: history.slice(-16), text, voice: current.voice, interruption: previousInterruption,
+    }, signal);
     let completed = false;
     for await (const event of events) {
       if (signal.aborted || turn !== current) return;
@@ -399,7 +461,10 @@ async function send(text, timing) {
       .map(entry => entry.text).filter(Boolean).join('\n');
     rememberAnswer(current, answer);
   } catch (error) {
-    if (!signal.aborted) showError(error.message);
+    if (!signal.aborted) {
+      updates?.interrupted();
+      showError(error.message);
+    }
   } finally {
     current.ended = true;
     if (turn === current) render();
@@ -407,6 +472,9 @@ async function send(text, timing) {
 }
 
 function newSession() {
+  updates?.stop();
+  updates = undefined;
+  pendingUpdates = [];
   interrupt(false);
   history = [];
   conversation = undefined;

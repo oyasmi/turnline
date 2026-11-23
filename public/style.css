@@ -122,7 +122,8 @@ input:not([type=checkbox]), select, textarea { color: #24304d; min-width: 0; bor
 .metrics dd { margin: 0; font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .speech-timing { border-top: 1px solid #eef0f7; }
 .speech-timing summary { padding: 12px 21px; color: var(--muted); cursor: pointer; font-size: .875rem; }
-.speech-timing .metrics { grid-template-columns: repeat(5, 1fr); }
+.speech-timing .metrics > div:nth-child(4n + 1) { border-left: 0; }
+.speech-timing .metrics > div:nth-child(n + 5) { border-top: 1px solid #eef0f7; }
 dialog { width: min(530px, calc(100% - 28px)); max-height: calc(100dvh - 34px); padding: 22px; color: inherit; border: 1px solid #dedff0; border-radius: 20px; box-shadow: 0 24px 84px #1d16434d; }
 dialog::backdrop { background: #17163279; }
 dialog h2 { font-size: 1.2rem; }
