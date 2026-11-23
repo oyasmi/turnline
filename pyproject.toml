@@ -1,7 +1,7 @@
 [project]
 name = "turnline"
-version = "0.1.0"
-description = "Browser voice calls with a local Python speech server"
+version = "1.0.0"
+description = "Local voice calls with Pipiclaw and bilingual Matcha"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.13,<4",

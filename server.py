@@ -4,14 +4,16 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from contextlib import aclosing
 from pathlib import Path
 from time import monotonic
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import WSMsgType, web
 
+from connection import DeviceStore, Pipiclaw, default_socket, default_state, error, loopback, normalize_origin
 from speech import ListeningTurn, SpeechModels
 from synthesis import SynthesisBusy, SynthesisQueue
 
@@ -19,18 +21,30 @@ PUBLIC = Path(__file__).resolve().parent / "public"
 LOG = logging.getLogger("turnline")
 
 
-def error(message, status=400):
-    return web.json_response({"error": {"message": str(message)}}, status=status)
+def browser_origin(request, public_origin):
+    if public_origin:
+        return public_origin if request.host == urlsplit(public_origin).netloc else None
+    host = urlsplit("//" + request.host).hostname
+    return f"http://{request.host}" if host and loopback(host) else None
 
 
-@web.middleware
-async def same_origin(request, handler):
-    origin = request.headers.get("Origin")
-    url = urlparse(origin) if origin else None
-    restricted = request.method == "POST" or request.path == "/speech/listen"
-    if restricted and url and (url.scheme not in {"http", "https"} or url.netloc != request.host):
-        return error("此接口只接受 Turnline 页面发出的请求。", 403)
-    return await handler(request)
+def browser_boundary(public_origin, pipiclaw):
+    @web.middleware
+    async def check(request, handler):
+        try:
+            origin = browser_origin(request, public_origin)
+        except ValueError:
+            origin = None
+        if not origin:
+            return error("请使用 Turnline 服务配置的访问地址。", 403)
+        supplied = request.headers.get("Origin")
+        restricted = request.method not in {"GET", "HEAD"} or request.path == "/speech/listen"
+        if restricted and supplied != origin and (supplied is not None or pipiclaw):
+            return error("请通过 Turnline 页面访问此接口。", 403)
+        if pipiclaw and request.path.startswith("/speech/") and not pipiclaw.device(request):
+            return error("请先配对此设备，再开始通话。", 401)
+        return await handler(request)
+    return check
 
 
 async def index(_request):
@@ -197,10 +211,45 @@ async def demo(request):
     return response
 
 
-def create_app(tts_engine="auto", tts_threads=2):
-    models = SpeechModels(tts_engine, tts_threads)
+def create_app(tts_threads=2, *, origin=None, socket_path=None, state_dir=None, demo_mode=False):
+    models = SpeechModels(tts_threads=tts_threads)
     synthesis = SynthesisQueue(models)
-    app = web.Application(middlewares=[same_origin], client_max_size=1024 * 1024)
+    pipiclaw = None if demo_mode else Pipiclaw(
+        socket_path or default_socket(), DeviceStore(state_dir or default_state()), origin or "http:",
+    )
+    app = web.Application(middlewares=[browser_boundary(origin, pipiclaw)], client_max_size=128 * 1024)
+
+    async def warm_models():
+        try:
+            await asyncio.gather(asyncio.to_thread(models.prepare_recognition),
+                                 asyncio.to_thread(models.prepare_synthesis))
+        except Exception:
+            LOG.exception("Voice model warmup failed")
+
+    async def prepare_models(_app):
+        warming = asyncio.create_task(warm_models())
+        try:
+            yield
+        finally:
+            warming.cancel()
+            await asyncio.gather(warming, return_exceptions=True)
+
+    async def demo_status(_request):
+        return web.json_response({"connection": "demo"})
+
+    app.cleanup_ctx.append(prepare_models)
+    if pipiclaw:
+        app.cleanup_ctx.append(pipiclaw.connect)
+        app.router.add_get("/api/session", pipiclaw.status)
+        app.router.add_post("/api/pair", pipiclaw.pair)
+        app.router.add_post("/api/sign-out", pipiclaw.sign_out)
+        app.router.add_post("/api/pipiclaw/v1/conversations", pipiclaw.relay, name="create-conversation")
+        app.router.add_get("/api/pipiclaw/v1/conversations/{conversation}/items", pipiclaw.relay,
+                           name="conversation-items")
+        app.router.add_post("/api/pipiclaw/v1/responses", pipiclaw.relay, name="responses")
+    else:
+        app.router.add_get("/api/session", demo_status)
+        app.router.add_post("/demo/v1/responses", demo)
 
     async def open_socket(request):
         return await listen(request, models)
@@ -219,42 +268,77 @@ def create_app(tts_engine="auto", tts_threads=2):
     app.router.add_get("/speech/info", speech_info)
     app.router.add_post("/speech/prepare", prepare)
     app.router.add_post("/speech/synthesize", generate)
-    app.router.add_post("/demo/v1/responses", demo)
     app.router.add_static("/", PUBLIC)
 
-    async def headers(_request, response):
+    async def headers(request, response):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
+        if request.path == "/" or request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        if request.path == "/":
+            site = browser_origin(request, origin)
+            if site:
+                websocket = site.replace("http", "ws", 1)
+                response.headers["Content-Security-Policy"] = (
+                    "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+                    f"form-action 'self'; connect-src 'self' {websocket}"
+                )
 
     app.on_response_prepare.append(headers)
     return app
 
 
-async def serve(host, port, tts_engine, tts_threads):
-    runner = web.AppRunner(create_app(tts_engine, tts_threads), access_log=None, handler_cancellation=True)
+async def serve(options, origin):
+    application = create_app(options.tts_threads, origin=origin, socket_path=options.pipiclaw_socket,
+                             state_dir=options.state_dir, demo_mode=options.demo)
+    runner = web.AppRunner(application, access_log=None, handler_cancellation=True)
     await runner.setup()
     try:
-        site = web.TCPSite(runner, host, port)
+        site = web.TCPSite(runner, options.host, options.port)
         await site.start()
         address, actual_port = runner.addresses[0][:2]
         label = f"[{address}]" if ":" in address else address
-        print(f"Turnline http://{label}:{actual_port}", flush=True)
+        print(f"Turnline {origin or f'http://{label}:{actual_port}'}", flush=True)
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("serve", "pair"), default="serve")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
-    parser.add_argument("--tts-engine", choices=("auto", "matcha", "kokoro"), default="auto")
+    parser.add_argument("--public-url", default=os.environ.get("TURNLINE_PUBLIC_URL"))
+    parser.add_argument("--state-dir", type=Path, default=default_state())
+    parser.add_argument("--pipiclaw-socket", type=Path, default=default_socket())
     parser.add_argument("--tts-threads", type=int, default=2)
+    parser.add_argument("--demo", action="store_true")
     options = parser.parse_args()
+    address = f"[{options.host}]" if ":" in options.host else options.host
+    try:
+        origin = normalize_origin(options.public_url) if options.public_url else None
+        if not loopback(options.host):
+            raise ValueError("Bind Turnline to loopback and put a HTTPS reverse proxy in front of it.")
+        if options.demo and origin and not loopback(urlsplit(origin).hostname):
+            raise ValueError("The offline demo is available on loopback only.")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if options.command == "pair":
+        if options.demo or (origin is None and options.port == 0):
+            parser.error("Pairing requires the deployed Turnline URL.")
+        site = origin or f"http://{address}:{options.port}"
+        print(f"{site}/#pair={DeviceStore(options.state_dir).issue()}")
+        return
     if options.tts_threads < 1:
         parser.error("--tts-threads must be at least 1")
     logging.basicConfig(level=logging.INFO)
     try:
-        asyncio.run(serve(options.host, options.port, options.tts_engine, options.tts_threads))
+        asyncio.run(serve(options, origin))
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    main()

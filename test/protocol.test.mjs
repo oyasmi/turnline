@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { pcmChunks } from '../public/audio.js';
+import { VoiceTurn } from '../public/voice-turn.js';
 import { updateSpeech } from '../public/conversation-updates.js';
-import { backendUrl, isBackchannel, readEvents, splitSpeech } from '../public/responses.js';
+import { isBackchannel, readEvents, speechText, splitSpeech } from '../public/responses.js';
 
 test('reads an SSE stream with split CRLF, split UTF-8, comments and multiline data', async () => {
   const bytes = new TextEncoder().encode(': keepalive\r\ndata: {"type":"delta",\r\ndata: "delta":"你好"}\r\n\r\ndata: [DONE]\n\n');
@@ -42,15 +43,39 @@ test('preserves PCM samples across arbitrary HTTP chunks and reports a truncated
   await assert.rejects(collect(stream(11)), /不完整/);
 });
 
-test('uses the supplied Responses base URL and keeps credentials out of it', () => {
-  assert.equal(backendUrl('http://127.0.0.1:8787/v1/responses/'), 'http://127.0.0.1:8787/v1');
-  assert.equal(backendUrl('', 'http://localhost:4173'), 'http://localhost:4173/demo/v1');
-  assert.throws(() => backendUrl('https://name:secret@example.com/v1'));
-  assert.throws(() => backendUrl('http://example.com/v1'));
+test('speaks capacity and hidden paths while leaving punctuation out of unsupported phones', () => {
+  assert.equal(speechText('《红楼梦》。占用 37%，`~/.cache` 约 6.5GB。'),
+    '红楼梦。占用 百分之37，家目录的点 cache 约 6.5吉字节。');
+  assert.equal(speechText('Disk is at 37%. Cache takes 6.5GB.'), 'Disk is at 37 percent. Cache takes 6.5 gigabytes.');
+});
+
+test('holds an unfinished sentence, joins its continuation, and releases it on timeout', () => {
+  const sent = [];
+  let scheduled;
+  const buffer = new VoiceTurn((...args) => sent.push(args), () => {}, callback => {
+    scheduled = callback;
+    return 1;
+  }, () => { scheduled = undefined; });
+  const start = { endpointAt: 100, asrMs: 20 };
+  const end = { endpointAt: 400, asrMs: 30 };
+  buffer.accept('你帮我看一下，现在。', start);
+  assert.equal(sent.length, 0);
+  assert.equal(typeof scheduled, 'function');
+  buffer.started();
+  assert.equal(scheduled, undefined);
+  buffer.accept('磁盘占用率怎么样？', end);
+  assert.deepEqual(sent.shift(), ['你帮我看一下，现在，磁盘占用率怎么样？', { endpointAt: 400, asrMs: 50 }]);
+  buffer.accept('我想问一下。', start);
+  scheduled();
+  assert.deepEqual(sent, [['我想问一下。', start]]);
+  buffer.accept('我想问一下。', start);
+  buffer.reset();
+  assert.equal(scheduled, undefined);
+  assert.equal(buffer.waiting, false);
 });
 
 test('acknowledgement filtering leaves questions, confirmations and corrections actionable', () => {
-  for (const text of ['嗯。', '嗯，嗯。', '哦。', 'うん。']) assert.equal(isBackchannel(text), true, text);
+  for (const text of ['嗯。', '嗯，嗯。', '哦。', 'うん。', '嗯ん。']) assert.equal(isBackchannel(text), true, text);
   for (const text of ['嗯？', '嗯，等一下。', 'うん、待って。', '好。', '取消。']) assert.equal(isBackchannel(text), false, text);
 });
 

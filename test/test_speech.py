@@ -1,5 +1,4 @@
 import asyncio
-import string
 import unittest
 from contextlib import aclosing
 from threading import Event
@@ -9,24 +8,16 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from server import tts
-from speech import spell_unknown_words
+from pronunciation import spoken_english
 from synthesis import SynthesisBusy, SynthesisQueue
 
 
 class EnglishSpeechTest(unittest.TestCase):
-    def setUp(self):
-        self.words = set(string.ascii_lowercase) | {"hello", "kubernetes", "world"}
-
-    def test_known_words_keep_their_reading_and_unknown_words_are_spelled(self):
-        self.assertEqual(spell_unknown_words("hello Kubernetes", self.words), "hello Kubernetes")
-        self.assertEqual(
-            spell_unknown_words("Zebrix-world", self.words).split(),
-            ["z", "e", "b", "r", "i", "x", "world"],
-        )
-
-    def test_missing_letter_reading_identifies_the_unspoken_word(self):
-        with self.assertRaisesRegex(ValueError, "Zebrix"):
-            spell_unknown_words("Zebrix", self.words - {"z"})
+    def test_english_is_casefolded_and_an_unknown_name_is_spelled(self):
+        words = set("abcdefghijklmnopqrstuvwxyz") | {"hello", "kubernetes", "world", "thirty", "seven", "percent"}
+        text = spoken_english("你好 Hello Kubernetes Zebrix-world", words)
+        self.assertEqual(text.split(), ["你好", "hello", "kubernetes", "z", "e", "b", "r", "i", "x", "world"])
+        self.assertEqual(spoken_english("37 percent.", words), "thirty seven percent.")
 
 
 class SynthesisQueueTest(unittest.IsolatedAsyncioTestCase):

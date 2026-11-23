@@ -4,19 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Turnline</title>
+  <meta name="theme-color" content="#f4f7f6">
+  <title>Turnline · 语音通话</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="./" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
-    <div class="top-actions">
-      <span id="backend-label" class="backend"><i aria-hidden="true"></i>本地演示</span>
-      <button id="open-settings" type="button" class="button ghost">连接设置</button>
+    <div class="topbar-inner">
+      <a class="brand" href="./" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
+      <div class="top-actions">
+        <span id="backend-label" data-connection="checking" class="backend" role="status"><i aria-hidden="true"></i>正在连接</span>
+        <button id="open-settings" type="button" class="button ghost">通话设置</button>
+      </div>
     </div>
   </header>
 
   <main>
+    <section id="connection-panel" class="connection-panel" aria-label="连接状态">
+      <p id="connection-detail">正在检查本机 Pipiclaw。</p>
+      <button id="retry-connection" type="button" class="button subtle" hidden>重试连接</button>
+    </section>
+
     <div class="workspace">
       <section class="call" aria-labelledby="call-title">
         <div class="call-top"><h1 id="call-title">语音通话</h1><time id="duration">00:00</time></div>
@@ -28,7 +36,7 @@
           <p id="hint" class="hint">开麦后，说完一句稍作停顿即可发送。</p>
         </div>
         <div class="call-actions">
-          <button id="call" type="button" class="button primary">开始通话</button>
+          <button id="call" type="button" class="button primary" disabled>开始通话</button>
           <div class="secondary-actions">
             <button id="mute" type="button" class="button outline" disabled>静音</button>
             <button id="interrupt" type="button" class="button outline" disabled>打断</button>
@@ -42,87 +50,70 @@
           <button id="new-session" type="button" class="button subtle">新对话</button>
         </header>
         <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="polite">
-          <p id="empty" class="empty">说句话，或发送一条文字消息。</p>
+          <p id="empty" class="empty">开始通话，或发送一条文字消息。</p>
         </div>
         <p id="error" class="error" role="alert" hidden></p>
         <form id="composer" class="composer">
           <label class="sr-only" for="message">文字消息</label>
-          <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息">
-          <button class="button send" type="submit">发送</button>
+          <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息" disabled>
+          <button id="send-message" class="button send" type="submit" disabled>发送</button>
         </form>
       </section>
     </div>
 
-    <section class="diagnostics" aria-labelledby="diagnostics-title">
-      <header class="panel-heading">
-        <h2 id="diagnostics-title">本轮延迟</h2>
-        <span id="models" class="models">语音模型未加载</span>
-      </header>
-      <dl class="metrics">
-        <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
-        <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
-        <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
-        <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
-      </dl>
-      <details class="speech-timing">
-        <summary>语音链路明细</summary>
+    <details class="diagnostics">
+      <summary><span>通话诊断</span><span id="trace-count" class="trace-count">暂无通话计时</span></summary>
+      <div class="diagnostics-content">
+        <div class="panel-heading">
+          <span id="models" class="models">SenseVoice · Matcha</span>
+          <button id="export-timing" type="button" class="button subtle" disabled>导出逐轮计时</button>
+        </div>
         <dl class="metrics">
+          <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
+          <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
+          <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
+          <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
+          <div><dt>断句到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
           <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
           <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
           <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
           <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
           <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
-          <div><dt>首段文本到浏览器收到 PCM</dt><dd id="metric-pcm">—</dd></div>
-          <div><dt>本轮播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
+          <div><dt>首段文本到收到 PCM</dt><dd id="metric-pcm">—</dd></div>
+          <div><dt>播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
         </dl>
-      </details>
-    </section>
+      </div>
+    </details>
   </main>
 
   <dialog id="settings">
     <form id="settings-form">
       <header class="panel-heading">
-        <h2>连接设置</h2>
-        <button type="button" id="close-settings" class="button subtle">关闭</button>
+        <h2>通话设置</h2>
+        <button id="close-settings" type="button" class="button subtle">关闭</button>
       </header>
-      <p class="settings-note">Base URL 留空时使用本地演示。连接其他服务时，请填写其 Responses API 的地址。</p>
-      <button id="pipiclaw-preset" type="button" class="button subtle preset">填入 Pipiclaw 本机配置</button>
       <div class="fields">
-        <label>Base URL<input id="base-url" inputmode="url" autocomplete="off" placeholder="https://example.com/v1"></label>
-        <div class="field-pair">
-          <label>模型<input id="model" required value="demo" autocomplete="off"></label>
-          <label>API 密钥<input id="api-key" type="password" autocomplete="off"></label>
-        </div>
-        <label>上下文
-          <select id="context">
-            <option value="history">客户端维护历史</option>
-            <option value="conversation">后端会话</option>
+        <label>断句停顿
+          <select id="silence">
+            <option value="0.35">紧凑 · 350 毫秒</option>
+            <option value="0.5">快速 · 500 毫秒</option>
+            <option value="0.8" selected>自然 · 800 毫秒</option>
+            <option value="1.2">从容 · 1.2 秒</option>
           </select>
         </label>
-        <label>播报模式
+        <label>播报时机
           <select id="reading">
-            <option value="confirmed">只播报确认后的正文</option>
+            <option value="confirmed">确认正文后播报</option>
             <option value="live">分句即时播报</option>
           </select>
         </label>
-        <label>补充通话指令<textarea id="instructions" rows="2" maxlength="3000" placeholder="例如：每次只说一个步骤。"></textarea></label>
-        <div class="field-pair">
-          <label>断句停顿
-            <select id="silence">
-              <option value="0.35">350 毫秒</option>
-              <option value="0.5" selected>500 毫秒</option>
-              <option value="0.8">800 毫秒</option>
-              <option value="1.2">1200 毫秒</option>
-            </select>
-          </label>
-          <label>音色
-            <select id="voice" disabled><option value="0">正在加载</option></select>
-          </label>
-        </div>
-        <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断（实验）</label>
+        <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断</label>
+        <label>补充通话指令
+          <textarea id="instructions" rows="2" maxlength="3000" placeholder="例如，每次只说一个步骤"></textarea>
+        </label>
       </div>
-      <p id="settings-error" class="error" role="alert" hidden></p>
       <div class="dialog-actions">
+        <button id="sign-out" class="button subtle" type="button" hidden>解除设备配对</button>
         <button class="button primary" type="submit">保存设置</button>
       </div>
     </form>

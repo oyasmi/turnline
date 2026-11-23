@@ -3,8 +3,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { chromium } from 'playwright';
 
-const engine = process.env.TURNLINE_TEST_TTS_ENGINE ?? 'auto';
-const server = spawn('uv', ['run', '--no-sync', 'python', 'server.py', '--port', '0', '--tts-engine', engine], {
+const server = spawn('uv', ['run', '--no-sync', 'python', 'server.py', '--port', '0', '--demo'], {
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 let browser;
@@ -19,25 +18,6 @@ try {
   page.setDefaultTimeout(20_000);
   const failures = [];
   const synthesisRequests = [];
-  let expectBackchannel = false;
-  const voiceInfo = await (await page.request.get(base + '/speech/info')).json();
-  if (voiceInfo.engine === 'kokoro') {
-    // Kokoro's synthetic “嗯” is misrecognized by SenseVoice. Keep the real
-    // VAD and playback path, and give this one transcript a stable fixture.
-    await page.routeWebSocket(url => url.pathname === '/speech/listen', client => {
-      client.connectToServer().onMessage(data => {
-        if (expectBackchannel && typeof data === 'string') {
-          const event = JSON.parse(data);
-          if (event.type === 'transcript') {
-            expectBackchannel = false;
-            client.send(JSON.stringify({ ...event, text: '嗯。' }));
-            return;
-          }
-        }
-        client.send(data);
-      });
-    });
-  }
   page.on('pageerror', error => failures.push(error.message));
   page.on('request', request => {
     if (request.method() === 'POST' && request.url() === base + '/speech/synthesize') {
@@ -97,7 +77,7 @@ try {
     await page.getByRole('button', { name: '发送', exact: true }).click();
   };
   const configure = async (reading, duplex) => {
-    await page.getByRole('button', { name: '连接设置' }).click();
+    await page.getByRole('button', { name: '通话设置' }).click();
     await page.locator('#reading').selectOption(reading);
     await page.locator('#duplex').setChecked(duplex);
     await page.getByRole('button', { name: '保存设置' }).click();
@@ -229,7 +209,6 @@ try {
   assert.match(await page.locator('.entry.assistant:last-child .content').textContent(), /打断测试/);
   assert.doesNotMatch(await page.locator('.entry.assistant:last-child .content').textContent(), /最后一句/);
   const beforeBackchannel = await page.locator('.entry.user').count();
-  expectBackchannel = voiceInfo.engine === 'kokoro';
   await page.evaluate(() => window.speakTestUtterance('嗯。'));
   await waitForText('#metric-interruption', /\d+ ms/);
   await waitForText('#status', /正在播报/);
@@ -244,7 +223,9 @@ try {
 
   // The items endpoint repeats foreground replies and can show a pending item
   // before completion. Follow its cursor without speaking either twice.
-  const fixtureBase = base + '/fixture/v1';
+  const fixtureBase = base + '/api/pipiclaw/v1';
+  const fixtureConversation = 'conv_' + 'a'.repeat(32);
+  await page.route(base + '/api/session', route => route.fulfill({ json: { connection: 'ready' } }));
   const items = [];
   const requests = [];
   const message = (id, text, status = 'completed') => ({
@@ -258,11 +239,12 @@ try {
       const after = searchParams.get('after');
       const start = after ? items.findIndex(item => item.id === after) + 1 : 0;
       const data = items.slice(start);
+      if (searchParams.get('order') === 'desc') data.reverse();
       await route.fulfill({ json: { data, has_more: false } });
       return;
     }
     if (pathname.endsWith('/conversations')) {
-      await route.fulfill({ json: { id: 'conv_fixture' } });
+      await route.fulfill({ json: { id: fixtureConversation } });
       return;
     }
     const body = request.postDataJSON();
@@ -277,9 +259,9 @@ try {
       { type: 'response.completed', response: { output: [answer] } },
     ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('') });
   });
-  await page.getByRole('button', { name: '连接设置' }).click();
-  await page.getByRole('button', { name: '填入 Pipiclaw 本机配置' }).click();
-  await page.locator('#base-url').fill(fixtureBase);
+  await page.reload();
+  await waitForText('#backend-label', /Pipiclaw 已连接/);
+  await page.getByRole('button', { name: '通话设置' }).click();
   await page.locator('#instructions').fill('每次只说一个步骤。');
   await page.getByRole('button', { name: '保存设置' }).click();
   await page.getByRole('button', { name: '开始通话' }).click();
@@ -306,8 +288,21 @@ try {
   assert.equal(requests[1].conversation, requests[0].conversation);
   assert.equal('instructions' in requests[1], false);
   assert.deepEqual(synthesisRequests.slice(beforeReceipt), ['已收到。', '检查完成。']);
+  await page.reload();
+  await waitForText('#backend-label', /Pipiclaw 已连接/);
+  await waitForText('.entry.assistant .content', /已收到/);
+  await page.locator('.diagnostics summary').click();
+  const [report] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: '导出逐轮计时' }).click(),
+  ]);
+  const samples = [];
+  for await (const chunk of await report.createReadStream()) samples.push(chunk);
+  const timing = JSON.parse(Buffer.concat(samples));
+  assert.ok(timing.turns.some(turn => Number.isFinite(turn.timing_ms.audio)));
+  assert.doesNotMatch(JSON.stringify(timing), /帮我后台检查|已收到/);
   assert.deepEqual(failures, []);
-  console.log('Confirmed output, backchannel resume, speech interruption, and conversation updates passed.');
+  console.log('Confirmed output, backchannel resume, speech interruption, session recovery and timing export passed.');
 } catch (error) {
   if (browser) {
     const page = browser.contexts()[0]?.pages()[0];

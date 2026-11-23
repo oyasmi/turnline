@@ -1,6 +1,5 @@
 """Download and verify the local speech models."""
 
-import argparse
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import file_digest
 from pathlib import Path
@@ -9,10 +8,11 @@ from urllib.request import Request, urlopen
 import shutil
 import tarfile
 
+from pronunciation import ENGLISH_LEXICON
+
 MODELS = Path(__file__).resolve().parent / "models"
 RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
 SENSE_VOICE = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
-KOKORO = "kokoro-int8-multi-lang-v1_1"
 MATCHA = "matcha-icefall-zh-en"
 MATCHA_MODEL = "model-steps-3.onnx"
 MATCHA_VOCODER = "vocos-16khz-univ.onnx"
@@ -23,19 +23,13 @@ ASSETS = (
      "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e"),
     ("asr-models", SILERO, SILERO, None,
      "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"),
+    ("tts-models", MATCHA + ".tar.bz2", MATCHA, MATCHA_MODEL,
+     "271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb2b0d086ef"),
+    ("tts-models", ENGLISH_LEXICON, ENGLISH_LEXICON, None,
+     "8b67ae549a465eee78f92ecb74644ad90c3c58ce65f19c68baf85878a10ef73a"),
+    ("vocoder-models", MATCHA_VOCODER, MATCHA_VOCODER, None,
+     "b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e"),
 )
-TTS_ASSETS = {
-    "matcha": (
-        ("tts-models", MATCHA + ".tar.bz2", MATCHA, MATCHA_MODEL,
-         "271b804af570400d3bcdcb53bf6e53cc9f75180ee763b9f13eb5eaf2b0d086ef"),
-        ("vocoder-models", MATCHA_VOCODER, MATCHA_VOCODER, None,
-         "b599142a1fb8ff03de3e84ac35ff537c619e56f4267a6fe894851a42844acf9e"),
-    ),
-    "kokoro": (
-        ("tts-models", KOKORO + ".tar.bz2", KOKORO, "model.int8.onnx",
-         "259c9c8bc906d6078e4e0570421885dabb68b539c2f970fcbb890a58eeaf3e9c"),
-    ),
-}
 
 
 def install(asset):
@@ -68,14 +62,9 @@ def install(asset):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tts-engine", choices=("auto", *TTS_ASSETS), default="auto")
-    options = parser.parse_args()
-    engines = TTS_ASSETS if options.tts_engine == "auto" else (options.tts_engine,)
-    assets = ASSETS + tuple(asset for engine in engines for asset in TTS_ASSETS[engine])
     MODELS.mkdir(exist_ok=True)
     with ThreadPoolExecutor() as pool:
-        list(pool.map(install, assets))
+        list(pool.map(install, ASSETS))
     print(f"Voice models are ready in {MODELS}")
 
 

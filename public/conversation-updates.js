@@ -12,13 +12,15 @@ export function updateSpeech(text) {
 // Follow a Pipiclaw conversation from its first item. Foreground SSE messages
 // already have a place in the transcript and must never be spoken twice.
 export class ConversationUpdates {
-  constructor(settings, conversation, canRead, onMessage) {
+  constructor(settings, conversation, canRead, onMessage, cursor) {
     this.settings = settings;
     this.conversation = conversation;
     this.canRead = canRead;
     this.onMessage = onMessage;
     this.controller = new AbortController();
     this.foreground = new Set();
+    this.after = cursor;
+    this.idleDelay = 1500;
     this.schedule(0);
   }
 
@@ -57,8 +59,13 @@ export class ConversationUpdates {
         const text = item.content.filter(part => part.type === 'output_text').map(part => part.text).join('\n').trim();
         if (text) this.onMessage(text, !this.uncertain);
       }
-      if (page.has_more && page.data.length) delay = 0;
-      else this.uncertain = false;
+      if (page.has_more && page.data.length) {
+        delay = 0;
+      } else {
+        this.uncertain = false;
+        this.idleDelay = page.data.length ? 1500 : Math.min(5000, this.idleDelay + 1000);
+        delay = this.idleDelay;
+      }
     } catch {
       delay = 5000;
     } finally {

@@ -74,11 +74,6 @@ async function requestSpeech(path, body, signal) {
 }
 
 export const speechServer = {
-  async info() {
-    const response = await fetch('./speech/info');
-    if (!response.ok) throw new Error('无法读取语音设置。');
-    return response.json();
-  },
   async prepare(signal) { return (await requestSpeech('prepare', undefined, signal)).json(); },
   async *synthesize(text, speaker, signal) {
     const response = await requestSpeech('synthesize', { text, speaker }, signal);

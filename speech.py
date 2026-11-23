@@ -1,15 +1,16 @@
 """Local SenseVoice recognition and speech synthesis."""
 
-import re
 from functools import cached_property
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
 
 import numpy as np
 import sherpa_onnx
 
-from setup_models import KOKORO, MATCHA, MATCHA_MODEL, MATCHA_VOCODER, MODELS, SENSE_VOICE, SILERO
+from pronunciation import ENGLISH_LEXICON, build_lexicon, spoken_english
+from setup_models import MATCHA, MATCHA_MODEL, MATCHA_VOCODER, MODELS, SENSE_VOICE, SILERO
 
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512
@@ -17,41 +18,6 @@ VAD_BUFFER_SECONDS = 30
 PRE_ROLL_SAMPLES = 2 * FRAME_SAMPLES
 HISTORY_CAPACITY = VAD_BUFFER_SECONDS * SAMPLE_RATE + PRE_ROLL_SAMPLES
 SETUP_HINT = "请在 Turnline 项目目录运行 uv run python setup_models.py。"
-ENGLISH_WORD = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
-ENGLISH_LEXICON = MODELS / KOKORO / "lexicon-us-en.txt"
-TECH_LEXICON = Path(__file__).resolve().with_name("kokoro-lexicon.txt")
-
-
-def load_english_words(*paths):
-    words = set()
-    for path in paths:
-        with path.open(encoding="utf-8") as source:
-            for line in source:
-                fields = line.split(maxsplit=1)
-                if len(fields) == 2:
-                    words.add(fields[0].lower())
-    return words
-
-
-def spell_unknown_words(text, known_words):
-    def pronunciation(match):
-        original = match.group()
-        word = original.lower().replace("’", "'")
-        if word in known_words:
-            return original
-        parts = word.split("-")
-        for index, part in enumerate(parts):
-            if part in known_words:
-                continue
-            letters = part.replace("'", "")
-            if not all(letter in known_words for letter in letters):
-                raise ValueError(f"无法播报英文词「{original}」。请改用文字查看。")
-            parts[index] = " ".join(letters)
-        # Separate expanded letters from adjacent digits or punctuation.
-        return " " + " ".join(parts) + " "
-
-    return ENGLISH_WORD.sub(pronunciation, text)
-
 
 def require(*paths):
     for path in paths:
@@ -60,27 +26,13 @@ def require(*paths):
 
 
 class SpeechModels:
-    def __init__(self, tts_engine="auto", tts_threads=2):
+    engine = "matcha"
+    voice_choices = ((0, "Matcha · 中英双语"),)
+
+    def __init__(self, tts_threads=2):
         self.tts_threads = tts_threads
-        if tts_engine == "auto":
-            has_matcha = (MODELS / MATCHA / MATCHA_MODEL).is_file() and (MODELS / MATCHA_VOCODER).is_file()
-            has_kokoro = (MODELS / KOKORO / "model.int8.onnx").is_file()
-            if has_matcha and has_kokoro:
-                tts_engine = "hybrid"
-            else:
-                tts_engine = "matcha" if has_matcha or not has_kokoro else "kokoro"
-        self.engine = tts_engine
         self.recognition_lock = Lock()
         self.synthesis_lock = Lock()
-
-    @property
-    def voice_choices(self):
-        kokoro = [(3, "女声 · Kokoro"), (58, "男声 · Kokoro")]
-        if self.engine == "matcha":
-            return [(0, "女声 · Matcha")]
-        if self.engine == "hybrid":
-            return [(0, "自动 · 优先使用 Matcha"), *kokoro]
-        return kokoro
 
     @cached_property
     def recognizer(self):
@@ -96,54 +48,33 @@ class SpeechModels:
         )
 
     @cached_property
-    def english_words(self):
-        return load_english_words(ENGLISH_LEXICON, TECH_LEXICON)
-
-    @cached_property
     def matcha(self):
-        return self.load_voice("matcha")
-
-    @cached_property
-    def kokoro(self):
-        return self.load_voice("kokoro")
-
-    def load_voice(self, engine):
-        folder = MODELS / (MATCHA if engine == "matcha" else KOKORO)
+        folder = MODELS / MATCHA
+        acoustic = folder / MATCHA_MODEL
+        vocoder = MODELS / MATCHA_VOCODER
+        lexicon = folder / "lexicon.txt"
         tokens = folder / "tokens.txt"
-        rules = [folder / name for name in ["date-zh.fst", "number-zh.fst", "phone-zh.fst"]]
-        require(tokens, *rules)
-        if engine == "matcha":
-            acoustic = folder / MATCHA_MODEL
-            vocoder = MODELS / MATCHA_VOCODER
-            lexicon = folder / "lexicon.txt"
-            require(acoustic, vocoder, lexicon)
+        english = MODELS / ENGLISH_LEXICON
+        rules = [folder / name for name in ("phone-zh.fst", "date-zh.fst", "number-zh.fst")]
+        require(acoustic, vocoder, lexicon, tokens, english, *rules)
+        with TemporaryDirectory(prefix="turnline-matcha-") as directory:
+            bilingual = Path(directory) / "lexicon.txt"
+            words = build_lexicon(bilingual, lexicon, english, tokens)
             model = sherpa_onnx.OfflineTtsModelConfig(
                 matcha=sherpa_onnx.OfflineTtsMatchaModelConfig(
                     acoustic_model=str(acoustic), vocoder=str(vocoder), tokens=str(tokens),
-                    lexicon=str(lexicon),
+                    lexicon=str(bilingual),
                 ),
                 num_threads=self.tts_threads,
             )
-        else:
-            onnx = folder / "model.int8.onnx"
-            voices = folder / "voices.bin"
-            lexicons = [ENGLISH_LEXICON, folder / "lexicon-zh.txt", TECH_LEXICON]
-            require(onnx, voices, *lexicons)
-            model = sherpa_onnx.OfflineTtsModelConfig(
-                kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
-                    model=str(onnx), voices=str(voices), tokens=str(tokens),
-                    lexicon=",".join(map(str, lexicons)),
-                ),
-                num_threads=self.tts_threads,
+            config = sherpa_onnx.OfflineTtsConfig(
+                model=model,
+                rule_fsts=",".join(map(str, rules)),
+                max_num_sentences=1,
             )
-        config = sherpa_onnx.OfflineTtsConfig(
-            model=model,
-            rule_fsts=",".join(map(str, rules)),
-            max_num_sentences=1,
-        )
-        if not config.validate():
-            raise RuntimeError("语音模型配置无效。请检查模型文件。")
-        return sherpa_onnx.OfflineTts(config)
+            if not config.validate():
+                raise RuntimeError("语音模型配置无效。请检查模型文件。")
+            return sherpa_onnx.OfflineTts(config), words
 
     def prepare_recognition(self):
         with self.recognition_lock:
@@ -151,8 +82,7 @@ class SpeechModels:
 
     def prepare_synthesis(self):
         with self.synthesis_lock:
-            voice = self.kokoro if self.engine == "kokoro" else self.matcha
-            return voice.num_speakers
+            return self.matcha[0].num_speakers
 
     def recognize(self, samples):
         with self.recognition_lock:
@@ -167,18 +97,9 @@ class SpeechModels:
             if cancelled.is_set():
                 return
             started = monotonic()
-            has_english = ENGLISH_WORD.search(text) is not None
-            use_matcha = self.engine != "kokoro" and speaker == 0 and not has_english
-            if self.engine == "matcha" and not use_matcha:
-                if speaker != 0:
-                    raise ValueError("请选择有效的音色。")
-                raise ValueError("这段话含英文。请安装 Kokoro 后重启 Turnline，或查看文字。")
-            voice = self.matcha if use_matcha else self.kokoro
-            if self.engine == "hybrid" and not use_matcha and speaker == 0:
-                speaker = 3
-            if not 0 <= speaker < voice.num_speakers:
+            voice, words = self.matcha
+            if speaker != 0:
                 raise ValueError("请选择有效的音色。")
-            spoken = text if use_matcha else spell_unknown_words(text, self.english_words)
             config = sherpa_onnx.GenerationConfig()
             config.sid = speaker
             config.speed = 1.07
@@ -198,7 +119,7 @@ class SpeechModels:
 
             if cancelled.is_set():
                 return
-            voice.generate(spoken, config, callback=on_pcm)
+            voice.generate(spoken_english(text, words), config, callback=on_pcm)
             if not has_audio and not cancelled.is_set():
                 raise RuntimeError("语音模型未生成可播放音频。请重试或改用文字。")
 

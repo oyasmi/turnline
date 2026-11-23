@@ -8,11 +8,11 @@ export const CALL_INSTRUCTIONS = `你正在和用户实时通话。用用户当�
 
 用户可能在任意一句中间插话。优先回应他刚说的话。收到播报停点时，以最后完整播完的一句为准。用户说“接着说”，就从那里往下讲；用户改了方向，就跟随新方向。如实说明已经执行的操作。
 
-语音转写里的名字、数字或命令有歧义，而且猜错会影响结果时，先核对关键字。`;
+语音转写里的名字、数字或命令有歧义时，先用最短的一句话核对关键词。确认前不要搜索猜测的人名或执行猜测的命令。简单问候和确认只说一句。磁盘容量用口语读出，路径可以放在文字记录。`;
 
 export function isBackchannel(text) {
   const syllables = text.replace(/[\s，。,.、…]/gu, '');
-  return /^(?:[嗯唔哦噢喔啊]{1,3}|(?:うー?ん){1,3})$/u.test(syllables);
+  return /^(?:[嗯唔哦噢喔啊ん]{1,3}|(?:うー?ん){1,3})$/u.test(syllables);
 }
 
 export async function* readEvents(stream) {
@@ -46,21 +46,8 @@ export async function* readEvents(stream) {
   }
 }
 
-export function backendUrl(value, origin) {
-  if (!value.trim()) return (origin ?? location.origin) + '/demo/v1';
-  const url = new URL(value.trim());
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error('请填写不含凭据或查询参数的 HTTP(S) Base URL。');
-  }
-  if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
-    throw new Error('远程后端请使用 HTTPS。本机后端可以使用 HTTP。');
-  }
-  return url.href.replace(/\/+$/, '').replace(/\/(?:responses|conversations)$/, '');
-}
-
-async function request(url, key, body, signal) {
+async function request(url, body, signal) {
   const headers = {};
-  if (key) headers.authorization = 'Bearer ' + key;
   const options = { headers, signal, redirect: 'error' };
   if (body !== undefined) {
     headers['content-type'] = 'application/json';
@@ -76,23 +63,25 @@ async function request(url, key, body, signal) {
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.error?.message ?? '后端返回 HTTP ' + response.status + '。');
+    const error = new Error(payload?.error?.message ?? '后端返回 HTTP ' + response.status + '。');
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
 
 export async function createConversation(settings, signal) {
-  const response = await request(settings.url + '/conversations', settings.key, {}, signal);
+  const response = await request(settings.url + '/conversations', {}, signal);
   const { id } = await response.json();
   if (typeof id !== 'string' || !id) throw new Error('后端没有返回会话 ID。');
   return id;
 }
 
-export async function listConversationItems(settings, conversation, after, signal) {
-  const query = new URLSearchParams({ order: 'asc', limit: '50' });
+export async function listConversationItems(settings, conversation, after, signal, order = 'asc') {
+  const query = new URLSearchParams({ order, limit: '50' });
   if (after) query.set('after', after);
   const response = await request(settings.url + '/conversations/' + encodeURIComponent(conversation) + '/items?' + query,
-    settings.key, undefined, signal);
+    undefined, signal);
   const page = await response.json();
   if (!Array.isArray(page.data) || typeof page.has_more !== 'boolean') throw new Error('会话消息格式无效。');
   return page;
@@ -105,7 +94,7 @@ export async function openResponse(settings, { conversation, messages, text, voi
     ...(voice ? { instructions: [CALL_INSTRUCTIONS, settings.instructions, interruption].filter(Boolean).join('\n') } : {}),
     ...(conversation ? { conversation, input: text } : { store: false, input: messages }),
   };
-  const response = await request(settings.url + '/responses', settings.key, body, signal);
+  const response = await request(settings.url + '/responses', body, signal);
   if (!response.headers.get('content-type')?.includes('text/event-stream')) {
     throw new Error('后端没有返回 SSE。请检查该地址是否支持流式 Responses API。');
   }
@@ -113,13 +102,21 @@ export async function openResponse(settings, { conversation, messages, text, voi
 }
 
 export function speechText(text) {
+  const chinese = /\p{Script=Han}/u.test(text) || !/[A-Za-z]/.test(text);
+  const units = chinese
+    ? { TB: '太字节', GB: '吉字节', MB: '兆字节', KB: '千字节' }
+    : { TB: ' terabytes', GB: ' gigabytes', MB: ' megabytes', KB: ' kilobytes' };
   return text
     .replace(/`{3}[\s\S]*?(?:`{3}|$)/g, '')
     .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/https?:\/\/[^\s，。！？]+/g, '')
     .replace(/^[ \t]*(?:#+|>|[-*+]\s|\d+\.\s)/gm, '')
-    .replace(/[`*#~_]/g, '')
+    .replace(/([+-]?\d+(?:\.\d+)?)\s*[%％]/gu, chinese ? '百分之$1' : '$1 percent')
+    .replace(/(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB)\b/gi, (_, number, unit) =>
+      number + units[unit.toUpperCase()])
+    .replace(/~\/\.([a-z][a-z\d-]*)(?![\w/-])/gi, chinese ? '家目录的点 $1' : 'home directory dot $1')
+    .replace(/[`*#~_《》]/g, '')
     .trim();
 }
 
