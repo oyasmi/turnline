@@ -1,0 +1,13 @@
+[project]
+name = "turnline"
+version = "0.1.0"
+description = "Browser voice calls with a local Python speech server"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.13,<4",
+  "numpy>=2,<3",
+  "sherpa-onnx==2.0.3",
+]
+
+[tool.uv]
+package = false
