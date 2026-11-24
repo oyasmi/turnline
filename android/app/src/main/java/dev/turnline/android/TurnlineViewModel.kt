@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -34,7 +35,10 @@ data class TurnlineState(
     val level: Float = 0f,
     val reading: String? = null,
     val notice: String? = null,
-    val recoverText: String? = null
+    val recoverText: String? = null,
+    val settingsSaving: Boolean = false,
+    val settingsSaved: Boolean = false,
+    val settingsSaveError: String? = null
 ) {
     val busy: Boolean get() = activeTurn != null
     val inCall: Boolean get() = call != CallStage.OFF
@@ -85,58 +89,53 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     suspend fun testConnection(settings: ServiceSettings) = api.check(settings)
 
-    suspend fun saveSettings(settings: ServiceSettings, tested: Boolean) {
+    fun saveSettings(settings: ServiceSettings, tested: Boolean) {
+        if (current.loading || current.settingsSaving) return
         val sameService = current.settings?.sameService(settings) == true
-        if (sameService) {
-            persistSettings(settings)
-            update { it.copy(settings = settings, reachable = tested || it.reachable, notice = null) }
-            refreshPolling()
-            return
-        }
-        endCall()
-        stopReading()
-        update { it.copy(loading = true) }
-        pollJob?.cancelAndJoin()
-        try {
-            turnJob?.cancelAndJoin()
-            val next = withContext(Dispatchers.IO) {
-                val restored = restored(settings)
-                store.saveSettings(settings)
-                restored
+        update { it.copy(loading = !sameService, settingsSaving = true, settingsSaveError = null) }
+        viewModelScope.launch {
+            try {
+                if (!sameService) {
+                    stopAudio()
+                    pollJob?.cancelAndJoin()
+                    turnJob?.cancelAndJoin()
+                }
+                val next = withContext(Dispatchers.IO) {
+                    val restored = if (sameService) null else restored(settings)
+                    store.saveSettings(settings)
+                    restored
+                }
+                update {
+                    if (next == null) it.copy(settings = settings, reachable = tested || it.reachable,
+                        settingsSaving = false, settingsSaved = true, notice = null)
+                    else next.copy(reachable = tested, settingsSaved = true)
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                update { it.copy(loading = false, settingsSaving = false,
+                    settingsSaveError = "无法保存设置。请检查设备存储后重试。") }
+            } finally {
+                refreshPolling()
             }
-            mutable.value = next.copy(reachable = tested)
-        } catch (error: Exception) {
-            update { it.copy(loading = false) }
-            if (error is CancellationException) throw error
-            throw IllegalStateException("无法保存设置。请检查设备存储后重试。", error)
-        } finally {
-            refreshPolling()
         }
     }
 
-    private suspend fun persistSettings(settings: ServiceSettings) {
-        try {
-            withContext(Dispatchers.IO) { store.saveSettings(settings) }
-        } catch (error: Exception) {
-            if (error is CancellationException) throw error
-            throw IllegalStateException("无法保存设置。请检查设备存储后重试。", error)
-        }
-    }
+    fun clearSettingsResult() = update { it.copy(settingsSaved = false, settingsSaveError = null) }
 
     fun setForeground(active: Boolean) {
         foreground = active
-        if (!active) {
-            endCall()
-            stopReading()
-        }
+        if (!active) stopAudio()
         refreshPolling()
+    }
+
+    fun stopAudio() {
+        if (current.inCall) endCall() else stopReading()
     }
 
     fun selectConversation(conversation: Conversation = Conversation()) {
         val scope = current.serviceScope ?: return
         if (current.loading || current.conversation.id == conversation.id) return
-        endCall()
-        stopReading()
+        stopAudio()
         update { it.copy(loading = true, notice = null, recoverText = null) }
         viewModelScope.launch {
             try {
@@ -162,10 +161,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         val scope = current.serviceScope ?: return
         if (current.busy || current.loading) return
         val selected = current.conversation.id == conversation.id
-        if (selected) {
-            endCall()
-            stopReading()
-        }
+        if (selected) stopAudio()
         update { it.copy(loading = true) }
         viewModelScope.launch {
             try {
@@ -211,23 +207,28 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
         turnJob = viewModelScope.launch {
             var stored = false
-            var finished = false
             var answers = emptyList<Message>()
             var result = Delivery.FAILED
             var issue: String? = null
             try {
-                pollJob?.cancelAndJoin()
-                withContext(Dispatchers.IO + NonCancellable) {
-                    store.startTurn(scope, thread, user, System.currentTimeMillis())
-                    store.rememberThread(scope, thread.id)
+                withContext(NonCancellable) {
+                    pollJob?.cancelAndJoin()
+                    withContext(Dispatchers.IO) {
+                        store.startTurn(scope, thread, user, System.currentTimeMillis())
+                        store.rememberThread(scope, thread.id)
+                    }
                     stored = true
                 }
+                ensureActive()
                 val remoteId = if (!settings.usesConversation) null else thread.remoteId ?: run {
                     val created = api.createConversation(settings)
-                    withContext(Dispatchers.IO + NonCancellable) { store.setRemoteId(thread.id, created) }
-                    update { it.copy(conversation = it.conversation.copy(remoteId = created)) }
+                    withContext(NonCancellable) {
+                        withContext(Dispatchers.IO) { store.setRemoteId(thread.id, created) }
+                        update { it.copy(conversation = it.conversation.copy(remoteId = created)) }
+                    }
                     created
                 }
+                ensureActive()
                 answers = api.respond(settings, remoteId, messages, voice) { draft ->
                     latest.set(draft)
                     viewModelScope.launch {
@@ -238,7 +239,6 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                         remoteId = output.id.takeIf { settings.usesConversation })
                 }
                 result = Delivery.COMPLETE
-                finished = true
             } catch (error: CancellationException) {
                 result = Delivery.STOPPED
                 throw error
@@ -251,41 +251,49 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     else -> "本轮处理失败，请重试。"
                 }
             } finally {
-                if (!finished) {
-                    val partial = latest.get()
-                    answers = if (partial.text.isBlank()) emptyList() else listOf(
-                        Message(role = Role.ASSISTANT, text = partial.text, delivery = result,
-                            remoteId = partial.itemId.takeIf { settings.usesConversation })
-                    )
-                }
-                var history = current.history
-                var saveIssue: String? = null
-                if (stored) {
-                    withContext(NonCancellable + Dispatchers.IO) {
+                // Finish the local turn, including the UI update, even when the HTTP call was cancelled.
+                withContext(NonCancellable) {
+                    val complete = result == Delivery.COMPLETE
+                    if (!complete) {
+                        answers = latest.get().outputs.map { output ->
+                            Message(role = Role.ASSISTANT, text = output.text, delivery = result,
+                                remoteId = output.id.takeIf { settings.usesConversation })
+                        }
+                    }
+                    var transcript = current.messages.filterNot { it.id == user.id }
+                    var history = current.history
+                    var saveIssue: String? = null
+                    if (stored) {
+                        transcript = (transcript + user.copy(delivery = result) + answers).takeLast(TRANSCRIPT_LIMIT)
                         try {
-                            store.finishTurn(thread.id, user.id, result, answers)
-                            history = store.conversations(scope)
+                            val (savedMessages, savedHistory) = withContext(Dispatchers.IO) {
+                                store.finishTurn(thread.id, user.id, result, answers)
+                                store.messages(thread.id) to store.conversations(scope)
+                            }
+                            transcript = savedMessages
+                            history = savedHistory
                         } catch (_: Exception) {
                             saveIssue = "本轮未能写入本机历史。"
                         }
                     }
-                }
-                if (current.activeTurn == user.id) {
-                    val transcript = (messages.dropLast(1) + user.copy(delivery = result) + answers)
-                        .takeLast(TRANSCRIPT_LIMIT)
-                    update {
-                        it.copy(messages = transcript, history = history, activeTurn = null, draft = null,
-                            reachable = finished || (issue == null && it.reachable),
-                            notice = saveIssue ?: issue, recoverText = text.takeIf { result == Delivery.FAILED })
+                    if (current.activeTurn == user.id) {
+                        update {
+                            val conversation = if (stored) it.conversation else it.conversation.copy(title = existing.title)
+                            it.copy(conversation = conversation,
+                                messages = transcript, history = history, activeTurn = null, draft = null,
+                                reachable = complete || (issue == null && it.reachable),
+                                notice = saveIssue ?: issue, recoverText = text.takeIf { result == Delivery.FAILED })
+                        }
+                        if (current.inCall && foreground && !current.loading) {
+                            when {
+                                complete && voiceSession == callId ->
+                                    play(answers.joinToString("\n\n") { it.text }, CALL_PLAYBACK)
+                                issue != null || saveIssue != null -> update { it.copy(call = CallStage.PAUSED) }
+                                else -> scheduleListening(300)
+                            }
+                        }
+                        refreshPolling()
                     }
-                    val automatic = finished && current.inCall && voiceSession == callId && foreground
-                    if (automatic) {
-                        play(answers.joinToString("\n\n") { it.text }, CALL_PLAYBACK)
-                    } else if (current.inCall) {
-                        if (issue != null || saveIssue != null) update { it.copy(call = CallStage.PAUSED) }
-                        else scheduleListening(300)
-                    }
-                    refreshPolling()
                 }
             }
         }
@@ -365,7 +373,9 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                             return@listen
                         }
                         silenceCount = 0
-                        send(heard.value, voice = true)
+                        if (!send(heard.value, voice = true)) {
+                            update { it.copy(call = CallStage.PAUSED, partialSpeech = "", level = 0f) }
+                        }
                     }
                     Heard.Silence -> repeatAfterSilence()
                     is Heard.Problem -> update {
@@ -378,15 +388,15 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     private fun repeatAfterSilence() {
         silenceCount++
-        if (silenceCount >= 3) {
-            update { it.copy(call = CallStage.PAUSED, partialSpeech = "", level = 0f) }
-        } else {
-            scheduleListening(400L * silenceCount)
+        update {
+            it.copy(call = if (silenceCount >= 3) CallStage.PAUSED else CallStage.WAITING,
+                partialSpeech = "", level = 0f)
         }
+        if (silenceCount < 3) scheduleListening(400L * silenceCount)
     }
 
     fun readMessage(message: Message) {
-        if (current.inCall || current.loading) return
+        if (!foreground || current.inCall || current.loading) return
         if (current.reading == message.id) stopReading() else play(message.text, message.id)
     }
 
@@ -398,8 +408,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             listenJob?.cancel()
             speech.cancelRecognition()
         }
-        update { it.copy(reading = id, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
-        speech.speak(text, settings.language) { error ->
+        fun finished(error: String?) {
             val shouldListen = call && callId == session && current.inCall
             update {
                 it.copy(reading = null, notice = error ?: it.notice,
@@ -407,6 +416,14 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             }
             if (shouldListen && error == null) scheduleListening(300)
         }
+        val spoken = speakableText(text)
+        if (spoken.none { it.isLetterOrDigit() }) {
+            stopReading()
+            finished(if (call) null else "这条消息没有可朗读的文字。")
+            return
+        }
+        update { it.copy(reading = id, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
+        speech.speak(spoken, settings.language, ::finished)
     }
 
     private fun stopReading() {
@@ -415,15 +432,23 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun refreshPolling() {
-        pollJob?.cancel()
-        val settings = current.settings ?: return
-        val scope = current.serviceScope ?: return
+        val settings = current.settings
+        val scope = current.serviceScope
         val thread = current.conversation
-        val remoteId = thread.remoteId ?: return
-        if (!foreground || !settings.usesConversation || current.loading || current.busy) return
+        val remoteId = thread.remoteId
+        val previous = pollJob
+        if (!foreground || settings?.usesConversation != true || scope == null || remoteId == null ||
+            current.loading || current.busy
+        ) {
+            previous?.cancel()
+            return
+        }
+        if (previous?.isActive == true) return
 
         pollJob = viewModelScope.launch {
-            var cursor = thread.cursor
+            // A cancelled poll may still be committing its last page.
+            withContext(NonCancellable) { previous?.join() }
+            var cursor = current.conversation.cursor
             var gap = 2_000L
             while (isActive) {
                 delay(gap)
@@ -432,14 +457,18 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     val changed = page.messages.isNotEmpty() || page.cursor != cursor
                     if (current.conversation.id != thread.id || current.busy) return@launch
                     if (changed) {
-                        val (messages, history) = withContext(Dispatchers.IO) {
-                            store.applyPage(thread.id, page)
-                            store.messages(thread.id) to store.conversations(scope)
-                        }
-                        cursor = page.cursor
-                        update {
-                            it.copy(conversation = it.conversation.copy(cursor = cursor), messages = messages,
-                                history = history, reachable = true)
+                        withContext(NonCancellable) {
+                            val (messages, history) = withContext(Dispatchers.IO) {
+                                store.applyPage(thread.id, page)
+                                store.messages(thread.id) to store.conversations(scope)
+                            }
+                            cursor = page.cursor
+                            update { state ->
+                                val pending = state.messages.lastOrNull()?.takeIf { it.id == state.activeTurn }
+                                val transcript = if (pending == null) messages else (messages + pending).takeLast(TRANSCRIPT_LIMIT)
+                                state.copy(conversation = state.conversation.copy(cursor = cursor), messages = transcript,
+                                    history = history, reachable = true)
+                            }
                         }
                     } else if (!current.reachable) {
                         update { it.copy(reachable = true) }
@@ -447,8 +476,8 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     gap = if (page.hasMore) 0 else if (changed) 2_000L else (gap + 1_000L).coerceAtMost(6_000L)
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
+                    if (error is ApiFailure) update { it.copy(reachable = false) }
                     if (error is ApiFailure && error.status in setOf(401, 403, 404)) {
-                        update { it.copy(reachable = false) }
                         break
                     }
                     gap = 8_000L
@@ -460,6 +489,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     fun clearNotice() = update { it.copy(notice = null, recoverText = null) }
 
     override fun onCleared() {
+        foreground = false
         speech.close()
         super.onCleared()
     }

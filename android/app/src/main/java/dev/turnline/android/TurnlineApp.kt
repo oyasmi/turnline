@@ -101,7 +101,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.withResumed
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.sin
@@ -114,10 +116,30 @@ fun TurnlineApp(model: TurnlineViewModel) {
     val focus = LocalFocusManager.current
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showHistory by rememberSaveable { mutableStateOf(false) }
-    var input by rememberSaveable(state.conversation.id) { mutableStateOf("") }
+    var draftThread by rememberSaveable { mutableStateOf("") }
+    var draftText by rememberSaveable { mutableStateOf("") }
+    val input = if (draftThread == state.conversation.id) draftText else ""
     var permissionHelp by remember { mutableStateOf(false) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val scope = rememberCoroutineScope()
     val microphone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (allowed) model.startCall() else permissionHelp = true
+        if (allowed) scope.launch {
+            lifecycle.withResumed {
+                if (!showSettings && !showHistory) model.startCall()
+            }
+        } else permissionHelp = true
+    }
+
+    LaunchedEffect(state.settingsSaved) {
+        if (state.settingsSaved) {
+            showSettings = false
+            model.clearSettingsResult()
+        }
+    }
+
+    fun changeInput(value: String) {
+        draftThread = state.conversation.id
+        draftText = value
     }
 
     fun startCall() {
@@ -131,7 +153,8 @@ fun TurnlineApp(model: TurnlineViewModel) {
     fun settings() {
         focus.clearFocus()
         keyboard?.hide()
-        model.endCall()
+        model.stopAudio()
+        model.clearSettingsResult()
         showSettings = true
     }
 
@@ -140,14 +163,18 @@ fun TurnlineApp(model: TurnlineViewModel) {
         Box(Modifier.fillMaxSize().windowInsetsPadding(
             WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
         )) {
-            if (showSettings) {
-                SettingsScreen(state.settings, model::testConnection, model::saveSettings) { showSettings = false }
+            if (showSettings && (!state.loading || state.settingsSaving)) {
+                SettingsScreen(
+                    state.settings, model::testConnection, model::saveSettings, state.settingsSaving || state.settingsSaved,
+                    state.settingsSaveError, model::clearSettingsResult
+                ) { showSettings = false }
             } else {
                 Column(Modifier.widthIn(max = 780.dp).fillMaxSize().align(Alignment.TopCenter)
                     .navigationBarsPadding().imePadding()) {
                     Header(state, ::settings) {
                         focus.clearFocus()
                         keyboard?.hide()
+                        model.stopAudio()
                         showHistory = true
                     }
 
@@ -162,7 +189,7 @@ fun TurnlineApp(model: TurnlineViewModel) {
                             Notice(notice, state.recoverText?.let { failed ->
                                 {
                                     model.endCall()
-                                    input = failed
+                                    changeInput(failed)
                                     model.clearNotice()
                                 }
                             }, model::clearNotice)
@@ -183,11 +210,11 @@ fun TurnlineApp(model: TurnlineViewModel) {
                         }
                         if (state.settings != null && !state.inCall) {
                             Composer(
-                                input, { if (it.length <= MAX_INPUT) input = it }, state.busy,
+                                input, { if (it.length <= MAX_INPUT) changeInput(it) }, state.busy,
                                 onVoice = ::startCall, onStop = model::stopResponse,
                                 onSend = {
                                     if (model.send(input)) {
-                                        input = ""
+                                        changeInput("")
                                         focus.clearFocus()
                                         keyboard?.hide()
                                     }
@@ -248,9 +275,7 @@ private fun Header(state: TurnlineState, settings: () -> Unit, history: () -> Un
                 }
             }
         }
-        if (state.settings != null) {
-            SmallButton(Glyph.HISTORY, "对话历史", history)
-        }
+        if (state.settings != null) SmallButton(Glyph.HISTORY, "对话历史", history, enabled = !state.loading)
         SmallButton(Glyph.SETTINGS, "连接与语音设置", settings, enabled = !state.loading)
     }
 }

@@ -50,7 +50,47 @@ class ResponsesClientTest {
                 assembleReply((delta + terminal).reader().buffered()) { draft = it }
             }
             assertTrue(failure.exceptionOrNull() is ApiFailure)
-            assertEquals(ResponseDraft("只到这里", "正在生成回复", "m1"), draft)
+            assertEquals(ResponseDraft("正在生成回复", listOf(Output("m1", "只到这里"))), draft)
+        }
+    }
+
+    @Test
+    fun malformedEventFlushesTheLatestTextWithEachRemoteItemId() {
+        val wire =
+            event("response.output_text.delta", """ "item_id":"m1","delta":"第一条" """) +
+            event("response.output_text.delta", """ "output_index":1,"item_id":"m2","delta":"第二" """) +
+            event("response.output_text.delta", """ "output_index":1,"item_id":"m2","delta":"条" """) +
+            "data: {invalid\n\n"
+        var draft = ResponseDraft()
+        assertTrue(runCatching { assembleReply(wire.reader().buffered()) { draft = it } }.isFailure)
+        assertEquals(listOf(Output("m1", "第一条"), Output("m2", "第二条")), draft.outputs)
+    }
+
+    @Test
+    fun oversizedFirstDeltaKeepsTheReceivedPrefix() {
+        val text = "字".repeat(150_000)
+        val wire = event("response.output_text.delta", """ "item_id":"m1","delta":"$text" """)
+        var draft = ResponseDraft()
+        val failure = runCatching { assembleReply(wire.reader().buffered()) { draft = it } }.exceptionOrNull()
+        assertTrue(failure is ApiFailure)
+        assertEquals(140_000, draft.text.length)
+        assertEquals("m1", draft.outputs.single().id)
+    }
+
+    @Test
+    fun incompleteJsonKeepsThePartialAnswer() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(json("""{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+                "output":[{"id":"m1","type":"message","role":"assistant",
+                    "content":[{"type":"output_text","text":"只到这里"}]}]}"""))
+            val client = ResponsesClient()
+            val messages = listOf(Message(role = Role.USER, text = "你好"))
+            var draft = ResponseDraft()
+            val failure = runCatching {
+                client.respond(settings(server, Provider.RESPONSES), null, messages, false) { draft = it }
+            }.exceptionOrNull()
+            assertTrue(failure is ApiFailure)
+            assertEquals(listOf(Output("m1", "只到这里")), draft.outputs)
         }
     }
 
@@ -80,6 +120,20 @@ class ResponsesClientTest {
             assertEquals(listOf("First", "Answer", "Follow-up"),
                 (0 until input.length()).map { input.getJSONObject(it).getString("content") })
         }
+    }
+
+    @Test
+    fun longAssistantAnswerKeepsItsPromptAndFollowUpInContext() {
+        val first = Message(role = Role.USER, text = "a".repeat(MAX_INPUT))
+        val answer = Message(role = Role.ASSISTANT, text = "开头" + "内容".repeat(30_000) + "结尾")
+        val followUp = Message(role = Role.USER, text = "b".repeat(MAX_INPUT), delivery = Delivery.PENDING)
+
+        val context = contextFor(listOf(first, answer, followUp))
+        assertEquals(listOf(first.id, answer.id, followUp.id), context.map { it.id })
+        assertTrue(context.sumOf { it.text.length } <= 36_000)
+        assertTrue(context[1].text.startsWith("开头"))
+        assertTrue(context[1].text.endsWith("结尾"))
+        assertEquals(60_004, answer.text.length)
     }
 
     @Test

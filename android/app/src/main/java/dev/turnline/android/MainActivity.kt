@@ -16,13 +16,13 @@ class MainActivity : ComponentActivity() {
         setContent { TurnlineTheme { TurnlineApp(model) } }
     }
 
-    override fun onStart() {
-        super.onStart()
+    override fun onResume() {
+        super.onResume()
         model.setForeground(true)
     }
 
-    override fun onStop() {
-        if (!isChangingConfigurations) model.setForeground(false)
-        super.onStop()
+    override fun onPause() {
+        model.setForeground(false)
+        super.onPause()
     }
 }

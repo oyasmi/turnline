@@ -22,12 +22,12 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private data class ReplyBlock(val text: String, val code: Boolean)
+internal data class ReplyBlock(val text: String, val code: Boolean)
 private val fence = Regex("^ {0,3}(```+|~~~+)(.*)$")
 private val inline = Regex("`([^`\\n]+)`|\\*\\*([^*\\n]+)\\*\\*|\\[([^]\\n]+)]\\((https?://[^)\\s]+)\\)")
 private val heading = Regex("^(#{1,6})\\s+(.+)")
 
-private fun blocks(text: String): List<ReplyBlock> = buildList {
+internal fun replyBlocks(text: String): List<ReplyBlock> = buildList {
     val buffer = StringBuilder()
     var delimiter: String? = null
     fun flush(code: Boolean) {
@@ -55,7 +55,7 @@ private fun blocks(text: String): List<ReplyBlock> = buildList {
 @Composable
 fun ReplyText(text: String) {
     val colors = MaterialTheme.colorScheme
-    val blocks = remember(text) { blocks(text) }
+    val blocks = remember(text) { replyBlocks(text) }
     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
         for (block in blocks) {
             if (block.code) {

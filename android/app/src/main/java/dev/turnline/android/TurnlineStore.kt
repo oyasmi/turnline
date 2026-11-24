@@ -158,13 +158,13 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
                 role = Role.ASSISTANT, text = answer.text, remoteId = remoteId)
             if (existing == null) {
                 insert(db, thread, message)
-                arrived = true
             } else {
                 db.update("messages", ContentValues().apply {
                     put("text", message.text)
                     put("delivery", Delivery.COMPLETE.name)
                 }, "id = ?", arrayOf(message.id))
             }
+            arrived = true
         }
         db.update("conversations", ContentValues().apply { put("cursor", page.cursor) }, "id = ?", arrayOf(thread))
         if (arrived) touch(db, thread, System.currentTimeMillis())

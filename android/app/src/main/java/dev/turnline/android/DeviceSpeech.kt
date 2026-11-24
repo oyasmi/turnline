@@ -29,7 +29,6 @@ class DeviceSpeech(private val context: Context) {
     private var deadline: Runnable? = null
     private var engine: TextToSpeech? = null
     private var engineReady = false
-    private var engineInitialized = false
     private var engineEpoch = 0L
     private var playback: Playback? = null
     private var focus: AudioFocusRequest? = null
@@ -72,24 +71,41 @@ class DeviceSpeech(private val context: Context) {
             bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()?.trim()?.take(MAX_INPUT).orEmpty()
 
-        fun timeout(ms: Long) {
+        fun timeout(ms: Long, action: () -> Unit) {
             deadline?.let(main::removeCallbacks)
-            deadline = Runnable { finish(Heard.Silence) }.also { main.postDelayed(it, ms) }
+            deadline = Runnable(action).also { main.postDelayed(it, ms) }
         }
 
-        recognizer.setRecognitionListener(object : RecognitionListener {
+        var transcribing = false
+        fun transcribe() {
+            if (recognition !== recognizer || transcribing) return
+            transcribing = true
+            onLevel(0f)
+            onTranscribing()
+            timeout(12_000) { finish(Heard.Problem("语音转写超时。点按麦克风可以重试。")) }
+        }
+
+        val listener = object : RecognitionListener {
             private var lastLevel = 0L
 
             override fun onReadyForSpeech(params: Bundle?) {
-                if (recognition === recognizer) timeout(16_000)
+                if (recognition === recognizer) timeout(16_000) { finish(Heard.Silence) }
             }
 
             override fun onBeginningOfSpeech() {
-                if (recognition === recognizer) timeout(45_000)
+                if (recognition !== recognizer) return
+                timeout(45_000) {
+                    transcribe()
+                    try {
+                        recognizer.stopListening()
+                    } catch (_: RuntimeException) {
+                        finish(Heard.Problem("无法完成语音转写。点按麦克风可以重试。"))
+                    }
+                }
             }
 
             override fun onRmsChanged(rmsdB: Float) {
-                if (recognition !== recognizer) return
+                if (recognition !== recognizer || transcribing) return
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastLevel >= 75) {
                     lastLevel = now
@@ -97,12 +113,7 @@ class DeviceSpeech(private val context: Context) {
                 }
             }
 
-            override fun onEndOfSpeech() {
-                if (recognition !== recognizer) return
-                onLevel(0f)
-                onTranscribing()
-                timeout(12_000)
-            }
+            override fun onEndOfSpeech() = transcribe()
 
             override fun onPartialResults(partialResults: Bundle?) {
                 if (recognition === recognizer) onText(results(partialResults))
@@ -132,7 +143,7 @@ class DeviceSpeech(private val context: Context) {
 
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
-        })
+        }
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -141,7 +152,8 @@ class DeviceSpeech(private val context: Context) {
             .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, local)
             .apply { if (settings.language.tag.isNotEmpty()) putExtra(RecognizerIntent.EXTRA_LANGUAGE, settings.language.tag) }
         try {
-            timeout(12_000)
+            recognizer.setRecognitionListener(listener)
+            timeout(12_000) { finish(Heard.Problem("语音识别服务启动超时。点按麦克风可以重试。")) }
             recognizer.startListening(intent)
         } catch (_: RuntimeException) {
             finish(Heard.Problem("无法启动麦克风。请检查权限后重试。"))
@@ -155,36 +167,37 @@ class DeviceSpeech(private val context: Context) {
         recognition = null
         if (current != null) {
             runCatching { current.cancel() }
-            current.destroy()
+            runCatching { current.destroy() }
         }
     }
 
     fun speak(text: String, language: SpeechLanguage, finished: (String?) -> Unit) {
         stopSpeaking()
-        val clean = speakableText(text)
-        if (clean.none { it.isLetterOrDigit() }) {
-            finished("这条消息没有可朗读的文字。")
-            return
-        }
         val id = ++nextPlayback
         val watchdog = Runnable {
             if (playback?.id == id && !engineReady) finishPlayback(id, "系统播报服务启动超时。")
         }
-        playback = Playback(id, clean, language, finished, watchdog)
+        playback = Playback(id, text, language, finished, watchdog)
         main.postDelayed(watchdog, 8_000)
         when {
             engineReady -> startPlayback()
-            engineInitialized -> finishPlayback(id, "设备没有可用的系统播报服务。")
             engine == null -> {
                 val epoch = ++engineEpoch
-                engine = TextToSpeech(context) { status ->
-                    main.post {
-                        if (engine == null || epoch != engineEpoch) return@post
-                        engineInitialized = true
-                        engineReady = status == TextToSpeech.SUCCESS
-                        if (engineReady) startPlayback()
-                        else playback?.let { finishPlayback(it.id, "设备没有可用的系统播报服务。") }
+                try {
+                    engine = TextToSpeech(context) { status ->
+                        main.post {
+                            if (engine == null || epoch != engineEpoch) return@post
+                            engineReady = status == TextToSpeech.SUCCESS
+                            if (engineReady) startPlayback()
+                            else {
+                                val pending = playback
+                                if (pending == null) shutdownEngine()
+                                else finishPlayback(pending.id, "设备没有可用的系统播报服务。")
+                            }
+                        }
                     }
+                } catch (_: RuntimeException) {
+                    finishPlayback(id, "无法启动系统播报服务。")
                 }
             }
         }
@@ -194,6 +207,14 @@ class DeviceSpeech(private val context: Context) {
         val current = playback ?: return
         val tts = engine ?: return
         main.removeCallbacks(current.watchdog)
+        try {
+            enqueueSpeech(tts, current)
+        } catch (_: RuntimeException) {
+            finishPlayback(current.id, "系统播报失败。")
+        }
+    }
+
+    private fun enqueueSpeech(tts: TextToSpeech, current: Playback) {
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
@@ -253,30 +274,33 @@ class DeviceSpeech(private val context: Context) {
     private fun finishPlayback(id: Long, error: String?) {
         val current = playback?.takeIf { it.id == id } ?: return
         stopSpeaking()
-        if (!engineReady) {
-            engine?.shutdown()
-            engine = null
-            engineInitialized = false
-        }
+        if (!engineReady) shutdownEngine()
         current.finished(error)
     }
 
     fun stopSpeaking() {
-        playback?.let {
+        val current = playback
+        playback = null
+        current?.let {
             main.removeCallbacks(it.watchdog)
             it.limit?.let(main::removeCallbacks)
+            runCatching { engine?.stop() }
         }
-        playback = null
-        engine?.stop()
-        focus?.let(audio::abandonAudioFocusRequest)
+        focus?.let { runCatching { audio.abandonAudioFocusRequest(it) } }
         focus = null
     }
 
     fun close() {
         cancelRecognition()
         stopSpeaking()
-        engine?.shutdown()
+        shutdownEngine()
+    }
+
+    private fun shutdownEngine() {
+        val current = engine
         engine = null
+        engineReady = false
+        runCatching { current?.shutdown() }
     }
 
     private data class Playback(
@@ -300,8 +324,8 @@ private fun voiceLocale(text: String, language: SpeechLanguage): Locale {
     }
 }
 
-internal fun speakableText(text: String): String = text
-    .replace(Regex("```[\\s\\S]*?(?:```|$)"), "")
+internal fun speakableText(text: String): String = replyBlocks(text)
+    .filterNot { it.code }.joinToString("\n") { it.text }
     .replace(Regex("!\\[[^]]*]\\([^)]+\\)"), "")
     .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
     .replace(Regex("https?://[^\\s，。！？]+"), "")

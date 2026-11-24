@@ -76,11 +76,23 @@ fun contextFor(messages: List<Message>): List<Message> {
     val context = mutableListOf<Message>()
     var remaining = 36_000
     for (message in eligible.asReversed().take(24)) {
-        if (message.text.length > remaining) break
-        context += message
-        remaining -= message.text.length
+        val entry = if (message.role == Role.ASSISTANT && message.text.length > MAX_INPUT) {
+            message.copy(text = contextExcerpt(message.text))
+        } else message
+        if (entry.text.length > remaining) break
+        context += entry
+        remaining -= entry.text.length
     }
     return context.asReversed().dropWhile { it.role == Role.ASSISTANT }
+}
+
+private fun contextExcerpt(text: String): String {
+    val marker = "\n[…]\n"
+    val side = (MAX_INPUT - marker.length) / 2
+    val headEnd = if (text[side - 1].isHighSurrogate()) side - 1 else side
+    val tailStart = text.length - side
+    val tail = if (text[tailStart].isLowSurrogate()) tailStart + 1 else tailStart
+    return text.substring(0, headEnd) + marker + text.substring(tail)
 }
 
 const val VOICE_INSTRUCTIONS = """你正在和用户通话。用用户当前使用的语言自然地说话，第一句先说结论、下一步或已确认的状态。平常回答一到三句，使用可直接朗读的纯文本。保留关键数字、单位和专名；遇到长命令、路径或代码，可以问用户是否要切到文字查看。语音转写里的名字、数字或命令有歧义时，先核对关键词。耗时工作如实说明进度。"""

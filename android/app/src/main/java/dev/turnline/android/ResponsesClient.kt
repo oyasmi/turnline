@@ -24,7 +24,9 @@ import org.json.JSONObject
 
 class ApiFailure(message: String, val status: Int? = null) : IOException(message)
 
-data class ResponseDraft(val text: String = "", val phase: String = "正在等待回复", val itemId: String? = null)
+data class ResponseDraft(val phase: String = "正在等待回复", val outputs: List<Output> = emptyList()) {
+    val text: String = outputs.joinToString("\n\n") { it.text }
+}
 
 data class ConversationPage(val messages: List<Output>, val cursor: String?, val hasMore: Boolean)
 
@@ -167,7 +169,9 @@ private fun readReply(response: Response, onDraft: (ResponseDraft) -> Unit): Lis
         "event-stream" -> body.charStream().buffered().use { reader ->
             assembleReply(reader, onDraft)
         }
-        "json" -> completedOutput(readJson(response))
+        "json" -> completedOutput(readJson(response)) { partial ->
+            onDraft(ResponseDraft("正在生成回复", partial))
+        }
         else -> throw ApiFailure("服务返回了意外的格式。请检查地址是否指向 Responses API。")
     }
     return result.ifEmpty { throw ApiFailure("服务已完成请求，但没有返回可显示的文字。") }
@@ -219,22 +223,34 @@ internal fun assistantOutput(item: JSONObject): Output? {
     return if (text.isBlank()) null else Output(item.string("id"), text)
 }
 
-private fun completedOutput(response: JSONObject): List<Output> {
+private fun completedOutput(response: JSONObject, onPartial: (List<Output>) -> Unit): List<Output> {
+    val output = responseOutput(response)
     val status = response.string("status")
     if (status != null && status != "completed" || response.optJSONObject("error") != null) {
+        if (output.isNotEmpty()) onPartial(output)
         throw responseFailure(response)
     }
-    return responseOutput(response)
+    return output
 }
 
 private fun responseOutput(response: JSONObject): List<Output> {
     val output = response.optJSONArray("output")
     val fallback = response.string("output_text")?.let { listOf(Output(null, it.take(MAX_OUTPUT))) }.orEmpty()
     if (output != null) {
-        return (0 until minOf(output.length(), MAX_OUTPUT_ITEMS))
-            .mapNotNull { output.optJSONObject(it)?.let(::assistantOutput) }.ifEmpty { fallback }
+        return boundedOutput((0 until minOf(output.length(), MAX_OUTPUT_ITEMS))
+            .mapNotNull { output.optJSONObject(it)?.let(::assistantOutput) }).ifEmpty { fallback }
     }
     return fallback
+}
+
+private fun boundedOutput(outputs: List<Output>): List<Output> = buildList {
+    var remaining = MAX_OUTPUT
+    for (output in outputs) {
+        if (remaining <= 0) break
+        val text = output.text.take(remaining).trimEnd()
+        if (text.isNotEmpty()) add(output.copy(text = text))
+        remaining -= text.length + 2
+    }
 }
 
 private fun responseFailure(payload: JSONObject): ApiFailure {
@@ -260,15 +276,12 @@ internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> U
     var phase = "正在等待回复"
     var received = 0
 
-    fun collected() = output.values.mapNotNull { it.output() }
-    fun snapshot(items: List<Output>) = ResponseDraft(
-        items.joinToString("\n\n") { it.text }.take(MAX_OUTPUT), phase, items.singleOrNull()?.id
-    )
+    fun collected() = boundedOutput(output.values.mapNotNull { it.output() })
     fun publish(force: Boolean = false) {
         val now = System.nanoTime()
         if (!force && now - lastUpdate < 45_000_000L) return
         lastUpdate = now
-        onDraft(snapshot(collected()))
+        onDraft(ResponseDraft(phase, collected()))
     }
 
     fun item(event: JSONObject): DraftItem {
@@ -277,62 +290,76 @@ internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> U
         return output.getOrPut(index, ::DraftItem).apply { id = event.string("item_id") ?: id }
     }
 
-    for ((named, data) in readEvents(reader) { publish(true) }) {
-        if (data == "[DONE]") return collected()
-        val event = JSONObject(data)
-        when (event.string("type") ?: named) {
-            "response.queued" -> {
-                phase = "正在排队"
-                publish(true)
-            }
-            "response.in_progress" -> {
-                phase = "正在生成回复"
-                publish(true)
-            }
-            "response.output_item.added", "response.output_item.done" -> {
-                val detail = event.optJSONObject("item") ?: continue
-                val current = item(event)
-                current.id = detail.string("id") ?: current.id
-                current.excluded = detail.string("type") != "message" ||
-                    detail.string("role") != "assistant" || detail.string("phase") == "commentary"
-                if (event.string("type") == "response.output_item.done" || named == "response.output_item.done") {
-                    current.finished = assistantOutput(detail)
+    var terminalPartial = emptyList<Output>()
+    try {
+        for ((named, data) in readEvents(reader)) {
+            if (data == "[DONE]") return collected()
+            val event = JSONObject(data)
+            when (val type = event.string("type") ?: named) {
+                "response.queued" -> {
+                    phase = "正在排队"
+                    publish(true)
                 }
-                phase = if (current.excluded) "正在处理" else "正在生成回复"
-                publish(true)
-            }
-            "response.output_text.delta", "response.refusal.delta",
-            "response.output_text.done", "response.refusal.done" -> {
-                val current = item(event)
-                if (current.excluded) continue
-                val piece = event.optString("delta", "")
-                val done = event.string("text") ?: event.string("refusal")
-                val partIndex = event.optInt("content_index", 0)
-                if (partIndex !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的内容条目过多。")
-                val part = current.parts.getOrPut(partIndex, ::StringBuilder)
-                received += maxOf(piece.length, (done?.length ?: 0) - part.length)
-                if (received > MAX_OUTPUT) throw ApiFailure("回复过长，已保留收到的文字。")
-                if (done != null) part.clear().append(done) else part.append(piece)
-                phase = "正在生成回复"
-                publish()
-            }
-            "response.completed" -> {
-                val complete = event.optJSONObject("response")?.let(::completedOutput).orEmpty()
-                return complete.ifEmpty { collected() }
-            }
-            "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error" -> {
-                val response = event.optJSONObject("response") ?: event
-                val partial = responseOutput(response)
-                if (partial.isEmpty()) publish(true) else onDraft(snapshot(partial))
-                throw responseFailure(response)
+                "response.in_progress" -> {
+                    phase = "正在生成回复"
+                    publish(true)
+                }
+                "response.output_item.added", "response.output_item.done" -> {
+                    val detail = event.optJSONObject("item") ?: continue
+                    val current = item(event)
+                    current.id = detail.string("id") ?: current.id
+                    current.excluded = detail.string("type") != "message" ||
+                        detail.string("role") != "assistant" || detail.string("phase") == "commentary"
+                    if (type == "response.output_item.done") {
+                        current.finished = assistantOutput(detail)
+                    }
+                    phase = if (current.excluded) "正在处理" else "正在生成回复"
+                    publish(true)
+                }
+                "response.output_text.delta", "response.refusal.delta",
+                "response.output_text.done", "response.refusal.done" -> {
+                    val current = item(event)
+                    if (current.excluded) continue
+                    val piece = event.optString("delta", "")
+                    val done = event.string("text") ?: event.string("refusal")
+                    val partIndex = event.optInt("content_index", 0)
+                    if (partIndex !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的内容条目过多。")
+                    val part = current.parts.getOrPut(partIndex, ::StringBuilder)
+                    if (done != null) {
+                        received -= part.length
+                        part.clear()
+                    }
+                    val text = done ?: piece
+                    val count = minOf(text.length, MAX_OUTPUT - received)
+                    part.append(text, 0, count)
+                    received += count
+                    phase = "正在生成回复"
+                    if (count < text.length) throw ApiFailure("回复过长，已保留收到的文字。")
+                    publish()
+                }
+                "response.completed" -> {
+                    val complete = event.optJSONObject("response")?.let { response ->
+                        completedOutput(response) { terminalPartial = it }
+                    }.orEmpty()
+                    return complete.ifEmpty(::collected)
+                }
+                "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error" -> {
+                    val response = event.optJSONObject("response") ?: event
+                    terminalPartial = responseOutput(response)
+                    throw responseFailure(response)
+                }
             }
         }
+        throw ApiFailure("回复流提前断开，已保留收到的文字。")
+    } catch (failure: Exception) {
+        if (failure is IOException || failure is JSONException) {
+            onDraft(ResponseDraft(phase, terminalPartial.ifEmpty(::collected)))
+        }
+        throw failure
     }
-    publish(true)
-    throw ApiFailure("回复流提前断开，已保留收到的文字。")
 }
 
-private fun readEvents(reader: BufferedReader, onReadFailure: () -> Unit): Sequence<Pair<String?, String>> = sequence {
+private fun readEvents(reader: BufferedReader): Sequence<Pair<String?, String>> = sequence {
     var name: String? = null
     val data = StringBuilder()
     val buffer = StringBuilder()
@@ -362,12 +389,7 @@ private fun readEvents(reader: BufferedReader, onReadFailure: () -> Unit): Seque
     }
 
     while (true) {
-        val raw = try {
-            nextLine()
-        } catch (failure: IOException) {
-            onReadFailure()
-            throw failure
-        } ?: break
+        val raw = nextLine() ?: break
         val line = if (first) raw.removePrefix("\uFEFF") else raw
         first = false
         if (line.isEmpty()) {

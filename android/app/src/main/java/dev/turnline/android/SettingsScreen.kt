@@ -57,33 +57,31 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(
     configured: ServiceSettings?,
     testConnection: suspend (ServiceSettings) -> Unit,
-    save: suspend (ServiceSettings, Boolean) -> Unit,
+    save: (ServiceSettings, Boolean) -> Unit,
+    saving: Boolean,
+    saveError: String?,
+    clearSaveError: () -> Unit,
     close: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
     var provider by rememberSaveable { mutableStateOf(configured?.provider ?: Provider.PIPICLAW) }
     var address by rememberSaveable {
-        mutableStateOf(configured?.url?.let {
-            if (it.encodedPath == "/responses") it.toString() else it.toString().removeSuffix("/responses")
-        }.orEmpty())
+        mutableStateOf(configured?.url?.toString().orEmpty())
     }
     var model by rememberSaveable {
         mutableStateOf(configured?.model?.takeIf { configured.provider == Provider.RESPONSES }.orEmpty())
     }
-    var token by remember { mutableStateOf(configured?.key.orEmpty()) }
+    var enteredToken by remember { mutableStateOf<String?>(null) }
     var showToken by remember { mutableStateOf(false) }
     var language by rememberSaveable { mutableStateOf(configured?.language ?: SpeechLanguage.CHINESE) }
     var local by rememberSaveable { mutableStateOf(configured?.localRecognition ?: true) }
     var testing by remember { mutableStateOf(false) }
-    var saving by remember { mutableStateOf(false) }
     var tested by remember { mutableStateOf<ServiceSettings?>(null) }
     var issue by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -91,6 +89,8 @@ fun SettingsScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val editable = !testing && !saving
     val http = address.trim().startsWith("http://", ignoreCase = true)
+    val endpoint = remember(address) { runCatching { responsesUrl(address) }.getOrNull() }
+    val token = enteredToken ?: configured?.takeIf { it.provider == provider && it.url == endpoint }?.key.orEmpty()
 
     fun form(): ServiceSettings {
         val url = responsesUrl(address)
@@ -103,6 +103,7 @@ fun SettingsScreen(
     }
     fun checkForm(): ServiceSettings? = try {
         issue = null
+        clearSaveError()
         focus.clearFocus()
         keyboard?.hide()
         form()
@@ -113,6 +114,11 @@ fun SettingsScreen(
     fun reset() {
         tested = null
         issue = null
+        clearSaveError()
+    }
+    fun clearToken() {
+        enteredToken = null
+        showToken = false
     }
 
     BackHandler { if (!saving) close() }
@@ -136,7 +142,13 @@ fun SettingsScreen(
                                 .background(if (active) colors.primaryContainer else colors.background)
                                 .border(1.dp, if (active) colors.primary.copy(alpha = 0.45f) else colors.outlineVariant,
                                     RoundedCornerShape(15.dp))
-                                .clickable(enabled = editable, role = Role.RadioButton) { provider = option; reset() }
+                                .clickable(enabled = editable, role = Role.RadioButton) {
+                                    if (provider != option) {
+                                        provider = option
+                                        clearToken()
+                                        reset()
+                                    }
+                                }
                                 .padding(horizontal = 6.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
                                 Text(option.label, fontSize = 14.sp,
                                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
@@ -149,7 +161,11 @@ fun SettingsScreen(
                         else "通过 /responses 发送消息，由手机保留近期对话上下文。",
                         fontSize = 13.sp, lineHeight = 20.sp, color = colors.onSurfaceVariant
                     )
-                    OutlinedTextField(address, { address = it; reset() }, Modifier.fillMaxWidth(),
+                    OutlinedTextField(address, { next ->
+                        if (endpoint != null && endpoint != runCatching { responsesUrl(next) }.getOrNull()) clearToken()
+                        address = next
+                        reset()
+                    }, Modifier.fillMaxWidth(),
                         label = { Text("服务地址") },
                         placeholder = { Text(if (provider == Provider.PIPICLAW) "http://192.168.1.5:8787/v1" else "https://api.example.com/v1") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -159,7 +175,7 @@ fun SettingsScreen(
                             label = { Text("模型 ID") }, placeholder = { Text("服务提供的模型名称") },
                             shape = RoundedCornerShape(13.dp), singleLine = true, enabled = editable)
                     }
-                    OutlinedTextField(token, { token = it; reset() }, Modifier.fillMaxWidth(),
+                    OutlinedTextField(token, { enteredToken = it; reset() }, Modifier.fillMaxWidth(),
                         label = { Text(if (provider == Provider.PIPICLAW) "API 密钥" else "API 密钥（如需）") },
                         singleLine = true, enabled = editable, shape = RoundedCornerShape(13.dp),
                         visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
@@ -199,11 +215,11 @@ fun SettingsScreen(
             Surface(Modifier.fillMaxWidth(), color = colors.background) {
                 Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    issue?.let { message ->
+                    (issue ?: saveError)?.let { message ->
                         Text(message, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = colors.error,
                             fontSize = 13.sp, lineHeight = 19.sp)
                     }
-                    if (tested != null && issue == null) {
+                    if (tested != null && issue == null && saveError == null) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             LineIcon(Glyph.CHECK, colors.primary, Modifier.size(17.dp))
                             Text("连接测试通过", Modifier.padding(start = 6.dp).semantics { liveRegion = LiveRegionMode.Polite },
@@ -232,19 +248,7 @@ fun SettingsScreen(
                         }
                         Button(onClick = {
                             val candidate = checkForm() ?: return@Button
-                            saving = true
-                            scope.launch {
-                                try {
-                                    val checked = tested?.sameService(candidate) == true
-                                    withContext(NonCancellable) { save(candidate, checked) }
-                                    close()
-                                } catch (error: Exception) {
-                                    if (error is CancellationException) throw error
-                                    issue = error.message ?: "保存失败，请重试。"
-                                } finally {
-                                    saving = false
-                                }
-                            }
+                            save(candidate, tested?.sameService(candidate) == true)
                         }, Modifier.weight(1f).heightIn(min = 49.dp), enabled = editable,
                             contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (saving) "正在保存" else "保存并返回", fontWeight = FontWeight.SemiBold)
