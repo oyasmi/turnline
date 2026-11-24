@@ -60,20 +60,27 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
 
     fun settings(): ServiceSettings? {
         val url = prefs.getString("url", null) ?: return null
+        val savedSource = prefs.getString("recognition_source", null)
+        val recognitionSource = if (savedSource == null && !prefs.getBoolean("local_recognition", true)) {
+            RecognitionSource.SYSTEM
+        } else {
+            RecognitionSource.entries.find { it.name == savedSource } ?: RecognitionSource.OFFLINE
+        }
         return ServiceSettings(
             provider = Provider.valueOf(prefs.getString("provider", Provider.PIPICLAW.name)!!),
             url = responsesUrl(url),
             model = prefs.getString("model", "pipiclaw").orEmpty(),
             key = prefs.getString("credential", null)?.let(vault::decrypt).orEmpty(),
             language = SpeechLanguage.valueOf(prefs.getString("language", SpeechLanguage.CHINESE.name)!!),
-            localRecognition = prefs.getBoolean("local_recognition", true)
+            recognitionSource = recognitionSource
         )
     }
 
     fun saveSettings(settings: ServiceSettings) {
         val editor = prefs.edit().putString("provider", settings.provider.name)
             .putString("url", settings.url.toString()).putString("model", settings.model)
-            .putString("language", settings.language.name).putBoolean("local_recognition", settings.localRecognition)
+            .putString("language", settings.language.name).putString("recognition_source", settings.recognitionSource.name)
+            .remove("local_recognition")
         if (settings.key.isEmpty()) editor.remove("credential")
         else editor.putString("credential", vault.encrypt(settings.key))
         check(editor.commit())

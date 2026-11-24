@@ -42,16 +42,19 @@ class DeviceSpeech(private val context: Context) {
         onResult: (Heard) -> Unit
     ) {
         cancelRecognition()
-        val local = settings.localRecognition
+        val source = settings.recognitionSource
         val recognizer = try {
-            when {
-                local && SpeechRecognizer.isOnDeviceRecognitionAvailable(context) ->
+            when (source) {
+                RecognitionSource.OFFLINE -> if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
                     SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-                !local && SpeechRecognizer.isRecognitionAvailable(context) ->
+                } else {
+                    onResult(Heard.Problem("手机没有可用的离线识别服务。可在设置中切换到「系统识别」。"))
+                    return
+                }
+                RecognitionSource.SYSTEM -> if (SpeechRecognizer.isRecognitionAvailable(context)) {
                     SpeechRecognizer.createSpeechRecognizer(context)
-                else -> {
-                    onResult(Heard.Problem(if (local) "设备没有可用的离线识别。可在设置中切换到系统识别。"
-                        else "设备没有可用的语音识别服务。"))
+                } else {
+                    onResult(Heard.Problem("设备没有可用的系统语音识别服务。"))
                     return
                 }
             }
@@ -82,7 +85,9 @@ class DeviceSpeech(private val context: Context) {
             transcribing = true
             onLevel(0f)
             onTranscribing()
-            timeout(12_000) { finish(Heard.Problem("语音转写超时。点按麦克风可以重试。")) }
+            timeout(12_000) {
+                finish(Heard.Problem("语音转写超时。点按麦克风可以重试。"))
+            }
         }
 
         val listener = object : RecognitionListener {
@@ -127,15 +132,18 @@ class DeviceSpeech(private val context: Context) {
             override fun onError(error: Int) {
                 val result = when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> Heard.Silence
-                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> Heard.Problem(
+                        "当前识别服务不支持所选语言。请在 Turnline 设置中更换识别语言。")
                     SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> Heard.Problem(
-                        "所选语言的识别模型不可用。请安装系统语音包，或在设置中更换语言或识别方式。"
-                    )
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> Heard.Problem("请在系统设置中允许 Turnline 使用麦克风。")
+                        "所选语言的识别模型不可用。请安装系统语音包或更换识别来源。")
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                        Heard.Problem("请在系统设置中允许 Turnline 使用麦克风。")
                     SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_AUDIO ->
                         Heard.Problem("麦克风暂时不可用。请关闭占用麦克风的应用后重试。")
                     SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
                         Heard.Problem("系统识别服务无法联网。可以切换到设备支持的离线识别。")
+                    SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_SERVER_DISCONNECTED ->
+                        Heard.Problem("语音识别服务已中断，请点按麦克风重试。")
                     else -> Heard.Problem("语音识别已中断，请点按麦克风重试。")
                 }
                 finish(result)
@@ -149,8 +157,12 @@ class DeviceSpeech(private val context: Context) {
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, local)
-            .apply { if (settings.language.tag.isNotEmpty()) putExtra(RecognizerIntent.EXTRA_LANGUAGE, settings.language.tag) }
+            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, source == RecognitionSource.OFFLINE)
+            .apply {
+                if (settings.language.tag.isNotEmpty()) {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, settings.language.tag)
+                }
+            }
         try {
             recognizer.setRecognitionListener(listener)
             timeout(12_000) { finish(Heard.Problem("语音识别服务启动超时。点按麦克风可以重试。")) }

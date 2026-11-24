@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,7 +33,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     configured: ServiceSettings?,
@@ -80,7 +82,9 @@ fun SettingsScreen(
     var enteredToken by remember { mutableStateOf<String?>(null) }
     var showToken by remember { mutableStateOf(false) }
     var language by rememberSaveable { mutableStateOf(configured?.language ?: SpeechLanguage.CHINESE) }
-    var local by rememberSaveable { mutableStateOf(configured?.localRecognition ?: true) }
+    var recognitionSource by rememberSaveable {
+        mutableStateOf(configured?.recognitionSource ?: RecognitionSource.OFFLINE)
+    }
     var testing by remember { mutableStateOf(false) }
     var tested by remember { mutableStateOf<ServiceSettings?>(null) }
     var issue by remember { mutableStateOf<String?>(null) }
@@ -99,7 +103,7 @@ fun SettingsScreen(
         require(provider != Provider.PIPICLAW || key.isNotEmpty()) { "PipiClaw 的 HTTP 接口需要 API 密钥。" }
         val name = if (provider == Provider.PIPICLAW) "pipiclaw" else model.trim()
         require(name.isNotBlank()) { "请填写服务使用的模型 ID。" }
-        return ServiceSettings(provider, url, name, key, language, local)
+        return ServiceSettings(provider, url, name, key, language, recognitionSource)
     }
     fun checkForm(): ServiceSettings? = try {
         issue = null
@@ -198,14 +202,20 @@ fun SettingsScreen(
                                 enabled = editable)
                         }
                     }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
-                            Text("仅在设备上识别", fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                            Text("需要系统离线语音包。关闭后使用系统识别，语音可能由其在线处理。",
-                                color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
+                    Text("识别来源", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        RecognitionSource.entries.forEach { source ->
+                            FilterChip(recognitionSource == source, { recognitionSource = source },
+                                label = { Text(source.label) }, enabled = editable)
                         }
-                        Switch(local, { local = it }, enabled = editable)
                     }
+                    Text(
+                        when (recognitionSource) {
+                            RecognitionSource.OFFLINE -> "在手机上离线转写，需要设备支持并安装相应的系统语音包。"
+                            RecognitionSource.SYSTEM -> "由手机的默认语音服务识别，该服务可能在线处理录音。"
+                        },
+                        color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp
+                    )
                 }
                 if (provider == Provider.RESPONSES) {
                     Text("测试连接会向所选模型发送一次简短请求。",
