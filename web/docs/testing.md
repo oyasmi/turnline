@@ -2,6 +2,8 @@
 
 ## 自动化
 
+在仓库的 `web/` 目录中执行下列命令。
+
 ```bash
 uv sync --locked --python 3.13
 uv run python setup_models.py

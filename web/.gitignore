@@ -1,0 +1,7 @@
+/.venv/
+/node_modules/
+/models/
+/.cache/
+/.pytest_cache/
+/playwright-report/
+/test-results/

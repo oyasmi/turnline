@@ -17,7 +17,7 @@ FRAME_SAMPLES = 512
 VAD_BUFFER_SECONDS = 30
 PRE_ROLL_SAMPLES = 2 * FRAME_SAMPLES
 HISTORY_CAPACITY = VAD_BUFFER_SECONDS * SAMPLE_RATE + PRE_ROLL_SAMPLES
-SETUP_HINT = "请在 Turnline 项目目录运行 uv run python setup_models.py。"
+SETUP_HINT = "请在 Turnline 的 web/ 目录运行 uv run python setup_models.py。"
 
 def require(*paths):
     for path in paths:

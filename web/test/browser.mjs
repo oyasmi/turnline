@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { chromium } from 'playwright';
 
 const server = spawn('uv', ['run', '--no-sync', 'python', 'server.py', '--port', '0', '--demo'], {
+  cwd: new URL('..', import.meta.url),
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 let browser;

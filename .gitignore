@@ -1,15 +1,7 @@
-# Local dependencies and model weights
-/.venv/
-/node_modules/
-/models/
-
 # Bytecode and test output
 __pycache__/
 *.py[cod]
 /.cache/
-/.pytest_cache/
-/playwright-report/
-/test-results/
 /artifacts/
 
 # Local settings and credentials
