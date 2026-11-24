@@ -1,6 +1,6 @@
 # Turnline for Android
 
-Android 12 及以上。原生 Kotlin 与 Jetpack Compose 界面适配系统深色模式。手机直接向配置的服务发送文字请求，语音识别和播报由 Android 语音服务完成。
+Android 12 及以上。原生 Kotlin 与 Jetpack Compose 界面适配系统深色模式。手机直接向配置的服务发送文字请求，语音播报可使用 Android 系统语音或本机 Matcha 模型。
 
 ## 连接模型
 
@@ -24,13 +24,17 @@ pipiclaw webapi key add turnline-android
 ## 通话与文字
 
 - 点麦克风开始通话。说完稍作停顿，Turnline 会发送转写文字，读完回复后自动续听。可点「打断」跳过播报或停止等待，点「挂断」回到当前对话的文字输入。
-- 默认使用「仅离线」，调用 Android 的离线识别服务，需要设备支持并安装相应的系统语音包。「系统识别」使用手机的默认语音服务，该服务可能在线处理录音。PipiClaw 和 Responses API 收到的是转写文字。播报优先使用设备上已安装的语音，音色和语言包取决于手机的系统引擎。离开应用时会释放麦克风和播报。
+- 默认使用「仅离线」，调用 Android 的离线识别服务，需要设备支持并安装相应的系统语音包。「系统识别」使用手机的默认语音服务，该服务可能在线处理录音。PipiClaw 和 Responses API 收到的是转写文字。离开应用时会释放麦克风和播报。
 - 点右上角历史图标可恢复对话或开启新对话。PipiClaw 的后台更新进入文字记录。复制、选中文本和单条朗读均可在聊天页操作。
 - API 密钥由 Android Keystore 保护。对话存在应用本机数据库中，按服务配置隔离。删除本机历史仅移除手机上的记录。网络中断时保留已经显示的回复片段，用户可以把失败的输入放回输入框。应用不会自动重发消息。
 
+### 选择播报引擎
+
+在「连接与语音 → 语音 → 播报引擎」中选择「Matcha · 中英双语」，点「保存并返回」。通话回复和聊天里的「朗读回复」都会使用随 APK 安装的 Matcha 和 Vocos，在手机上离线合成中文、英文及中英混读。第一次播报会加载模型。默认的「系统播报」优先使用手机已安装的本地语音。
+
 ## 构建
 
-需要 JDK 17 或更新版本以及 Android SDK Platform 36。在 Android Studio 打开 `android/`，或从这个目录执行下列命令。
+需要 JDK 17 或更新版本、Android SDK Platform 36 及 Python 3.12 或更新版本。首次构建会从 GitHub 获取 Sherpa-ONNX Android 运行库和 Matcha 模型，已有的 Web Matcha 模型文件可复用。若 Python 不在默认路径，可通过 `-PmatchaPython=/path/to/python` 指定。在 Android Studio 打开 `android/`，或从这个目录执行下列命令。
 
 ```bash
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug

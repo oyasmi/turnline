@@ -85,6 +85,7 @@ fun SettingsScreen(
     var recognitionSource by rememberSaveable {
         mutableStateOf(configured?.recognitionSource ?: RecognitionSource.OFFLINE)
     }
+    var speechOutput by rememberSaveable { mutableStateOf(configured?.speechOutput ?: SpeechOutput.SYSTEM) }
     var testing by remember { mutableStateOf(false) }
     var tested by remember { mutableStateOf<ServiceSettings?>(null) }
     var issue by remember { mutableStateOf<String?>(null) }
@@ -103,7 +104,7 @@ fun SettingsScreen(
         require(provider != Provider.PIPICLAW || key.isNotEmpty()) { "PipiClaw 的 HTTP 接口需要 API 密钥。" }
         val name = if (provider == Provider.PIPICLAW) "pipiclaw" else model.trim()
         require(name.isNotBlank()) { "请填写服务使用的模型 ID。" }
-        return ServiceSettings(provider, url, name, key, language, recognitionSource)
+        return ServiceSettings(provider, url, name, key, language, recognitionSource, speechOutput)
     }
     fun checkForm(): ServiceSettings? = try {
         issue = null
@@ -196,7 +197,7 @@ fun SettingsScreen(
 
                 SettingsGroup("语音") {
                     Text("识别语言", fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         SpeechLanguage.entries.forEach { option ->
                             FilterChip(language == option, { language = option }, label = { Text(option.label) },
                                 enabled = editable)
@@ -216,6 +217,17 @@ fun SettingsScreen(
                         },
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp
                     )
+                    Text("播报引擎", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SpeechOutput.entries.forEach { output ->
+                            FilterChip(speechOutput == output, { speechOutput = output },
+                                label = { Text(output.label) }, enabled = editable)
+                        }
+                    }
+                    if (speechOutput == SpeechOutput.MATCHA) {
+                        Text("在手机上离线合成中文、英文和中英混读。",
+                            color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
+                    }
                 }
                 if (provider == Provider.RESPONSES) {
                     Text("测试连接会向所选模型发送一次简短请求。",

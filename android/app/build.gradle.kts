@@ -4,6 +4,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val matchaAssets = layout.buildDirectory.dir("generated/matcha/assets")
+val sherpaAar = layout.buildDirectory.file("dependencies/sherpa-onnx.aar")
+val prepareMatcha by tasks.registering(Exec::class) {
+    val script = rootProject.file("prepare_matcha.py")
+    inputs.files(script, rootProject.file("../web/setup_models.py"), rootProject.file("../web/pronunciation.py"))
+    outputs.dir(matchaAssets)
+    outputs.file(sherpaAar)
+    val defaultPython = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+    commandLine(providers.gradleProperty("matchaPython").getOrElse(defaultPython), script,
+        sherpaAar.get().asFile, matchaAssets.get().asFile)
+}
+
 android {
     namespace = "dev.turnline.android"
     compileSdk = 36
@@ -24,15 +36,21 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+
+    sourceSets["main"].assets.srcDir(matchaAssets)
+    androidResources.noCompress += "onnx"
+    packaging.jniLibs.useLegacyPackaging = true
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+tasks.named("preBuild") { dependsOn(prepareMatcha) }
 
 kotlin {
     compilerOptions {
@@ -41,6 +59,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(files(sherpaAar).builtBy(prepareMatcha))
     implementation(platform("androidx.compose:compose-bom:2025.05.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.foundation:foundation")

@@ -20,13 +20,19 @@ enum class RecognitionSource(val label: String) {
     SYSTEM("系统识别")
 }
 
+enum class SpeechOutput(val label: String) {
+    SYSTEM("系统播报"),
+    MATCHA("Matcha · 中英双语")
+}
+
 data class ServiceSettings(
     val provider: Provider,
     val url: HttpUrl,
     val model: String,
     val key: String,
     val language: SpeechLanguage = SpeechLanguage.CHINESE,
-    val recognitionSource: RecognitionSource = RecognitionSource.OFFLINE
+    val recognitionSource: RecognitionSource = RecognitionSource.OFFLINE,
+    val speechOutput: SpeechOutput = SpeechOutput.SYSTEM
 ) {
     val usesConversation: Boolean get() = provider == Provider.PIPICLAW
 

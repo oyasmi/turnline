@@ -25,6 +25,7 @@ sealed interface Heard {
 class DeviceSpeech(private val context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val audio = context.getSystemService(AudioManager::class.java)
+    private val matcha = MatchaSpeech(context)
     private var recognition: SpeechRecognizer? = null
     private var deadline: Runnable? = null
     private var engine: TextToSpeech? = null
@@ -183,13 +184,27 @@ class DeviceSpeech(private val context: Context) {
         }
     }
 
-    fun speak(text: String, language: SpeechLanguage, finished: (String?) -> Unit) {
+    fun speak(text: String, settings: ServiceSettings, finished: (String?) -> Unit) {
         stopSpeaking()
         val id = ++nextPlayback
+        val current = Playback(id, text, settings.language, settings.speechOutput, finished)
+        playback = current
+        if (current.output == SpeechOutput.MATCHA) {
+            try {
+                val attributes = requestPlaybackFocus(current) ?: return
+                setPlaybackLimit(current, 45_000L)
+                matcha.play(speechChunks(text), attributes) { error ->
+                    main.post { finishPlayback(id, error) }
+                }
+            } catch (_: RuntimeException) {
+                finishPlayback(id, "Matcha 播报失败。")
+            }
+            return
+        }
         val watchdog = Runnable {
             if (playback?.id == id && !engineReady) finishPlayback(id, "系统播报服务启动超时。")
         }
-        playback = Playback(id, text, language, finished, watchdog)
+        current.watchdog = watchdog
         main.postDelayed(watchdog, 8_000)
         when {
             engineReady -> startPlayback()
@@ -202,7 +217,7 @@ class DeviceSpeech(private val context: Context) {
                             engineReady = status == TextToSpeech.SUCCESS
                             if (engineReady) startPlayback()
                             else {
-                                val pending = playback
+                                val pending = playback?.takeIf { it.output == SpeechOutput.SYSTEM }
                                 if (pending == null) shutdownEngine()
                                 else finishPlayback(pending.id, "设备没有可用的系统播报服务。")
                             }
@@ -216,9 +231,9 @@ class DeviceSpeech(private val context: Context) {
     }
 
     private fun startPlayback() {
-        val current = playback ?: return
+        val current = playback?.takeIf { it.output == SpeechOutput.SYSTEM } ?: return
         val tts = engine ?: return
-        main.removeCallbacks(current.watchdog)
+        current.watchdog?.let(main::removeCallbacks)
         try {
             enqueueSpeech(tts, current)
         } catch (_: RuntimeException) {
@@ -226,7 +241,7 @@ class DeviceSpeech(private val context: Context) {
         }
     }
 
-    private fun enqueueSpeech(tts: TextToSpeech, current: Playback) {
+    private fun requestPlaybackFocus(current: Playback): AudioAttributes? {
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
@@ -237,10 +252,14 @@ class DeviceSpeech(private val context: Context) {
             }, main).build()
         if (audio.requestAudioFocus(request) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             finishPlayback(current.id, "暂时无法播放语音。")
-            return
+            return null
         }
         focus = request
+        return attributes
+    }
 
+    private fun enqueueSpeech(tts: TextToSpeech, current: Playback) {
+        val attributes = requestPlaybackFocus(current) ?: return
         val locale = voiceLocale(current.text, current.language)
         val localVoice = tts.voices.orEmpty().filter {
             it.locale.language == locale.language && !it.isNetworkConnectionRequired &&
@@ -258,9 +277,7 @@ class DeviceSpeech(private val context: Context) {
 
         val chunks = speechChunks(current.text)
         val last = "${current.id}:${chunks.lastIndex}"
-        val limit = Runnable { finishPlayback(current.id, "播报用时过长，已停止。") }
-        current.limit = limit
-        main.postDelayed(limit, (15_000L + current.text.length * 180L).coerceAtMost(600_000L))
+        setPlaybackLimit(current, 15_000L)
         tts.setAudioAttributes(attributes)
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
@@ -283,10 +300,16 @@ class DeviceSpeech(private val context: Context) {
         }
     }
 
+    private fun setPlaybackLimit(current: Playback, startupMs: Long) {
+        val limit = Runnable { finishPlayback(current.id, "播报用时过长，已停止。") }
+        current.limit = limit
+        main.postDelayed(limit, (startupMs + current.text.length * 180L).coerceAtMost(600_000L))
+    }
+
     private fun finishPlayback(id: Long, error: String?) {
         val current = playback?.takeIf { it.id == id } ?: return
         stopSpeaking()
-        if (!engineReady) shutdownEngine()
+        if (current.output == SpeechOutput.SYSTEM && !engineReady) shutdownEngine()
         current.finished(error)
     }
 
@@ -294,9 +317,12 @@ class DeviceSpeech(private val context: Context) {
         val current = playback
         playback = null
         current?.let {
-            main.removeCallbacks(it.watchdog)
+            it.watchdog?.let(main::removeCallbacks)
             it.limit?.let(main::removeCallbacks)
-            runCatching { engine?.stop() }
+            when (it.output) {
+                SpeechOutput.SYSTEM -> runCatching { engine?.stop() }
+                SpeechOutput.MATCHA -> matcha.stop()
+            }
         }
         focus?.let { runCatching { audio.abandonAudioFocusRequest(it) } }
         focus = null
@@ -306,6 +332,7 @@ class DeviceSpeech(private val context: Context) {
         cancelRecognition()
         stopSpeaking()
         shutdownEngine()
+        matcha.close()
     }
 
     private fun shutdownEngine() {
@@ -319,8 +346,9 @@ class DeviceSpeech(private val context: Context) {
         val id: Long,
         val text: String,
         val language: SpeechLanguage,
+        val output: SpeechOutput,
         val finished: (String?) -> Unit,
-        val watchdog: Runnable,
+        var watchdog: Runnable? = null,
         var limit: Runnable? = null
     )
 }

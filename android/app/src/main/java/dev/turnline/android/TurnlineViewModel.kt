@@ -423,7 +423,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             return
         }
         update { it.copy(reading = id, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
-        speech.speak(spoken, settings.language, ::finished)
+        speech.speak(spoken, settings, ::finished)
     }
 
     private fun stopReading() {

@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import ssl
 from contextlib import aclosing
 from pathlib import Path
 from time import monotonic
@@ -291,13 +292,13 @@ def create_app(tts_threads=2, *, origin=None, socket_path=None, state_dir=None, 
     return app
 
 
-async def serve(options, origin):
+async def serve(options, origin, ssl_context=None):
     application = create_app(options.tts_threads, origin=origin, socket_path=options.pipiclaw_socket,
                              state_dir=options.state_dir, demo_mode=options.demo)
     runner = web.AppRunner(application, access_log=None, handler_cancellation=True)
     await runner.setup()
     try:
-        site = web.TCPSite(runner, options.host, options.port)
+        site = web.TCPSite(runner, options.host, options.port, ssl_context=ssl_context)
         await site.start()
         address, actual_port = runner.addresses[0][:2]
         label = f"[{address}]" if ":" in address else address
@@ -313,6 +314,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument("--public-url", default=os.environ.get("TURNLINE_PUBLIC_URL"))
+    parser.add_argument("--tls-cert", type=Path, help="PEM certificate chain for direct HTTPS")
+    parser.add_argument("--tls-key", type=Path, help="PEM private key for direct HTTPS")
     parser.add_argument("--state-dir", type=Path, default=default_state())
     parser.add_argument("--pipiclaw-socket", type=Path, default=default_socket())
     parser.add_argument("--tts-threads", type=int, default=2)
@@ -321,23 +324,35 @@ def main():
     address = f"[{options.host}]" if ":" in options.host else options.host
     try:
         origin = normalize_origin(options.public_url) if options.public_url else None
-        if not loopback(options.host):
-            raise ValueError("Bind Turnline to loopback and put a HTTPS reverse proxy in front of it.")
-        if options.demo and origin and not loopback(urlsplit(origin).hostname):
+        local_listener = loopback(options.host)
+        if options.demo and (not local_listener or (origin and not loopback(urlsplit(origin).hostname))):
             raise ValueError("The offline demo is available on loopback only.")
     except ValueError as exc:
         parser.error(str(exc))
     if options.command == "pair":
-        if options.demo or (origin is None and options.port == 0):
+        if options.demo or (origin is None and (options.port == 0 or not local_listener)):
             parser.error("Pairing requires the deployed Turnline URL.")
         site = origin or f"http://{address}:{options.port}"
         print(f"{site}/#pair={DeviceStore(options.state_dir).issue()}")
         return
     if options.tts_threads < 1:
         parser.error("--tts-threads must be at least 1")
+    if bool(options.tls_cert) != bool(options.tls_key):
+        parser.error("--tls-cert and --tls-key must be supplied together.")
+    if not local_listener and not options.tls_cert:
+        parser.error("A non-loopback listener requires --tls-cert and --tls-key.")
+    ssl_context = None
+    if options.tls_cert:
+        if not origin or not origin.startswith("https://"):
+            parser.error("Direct HTTPS requires an HTTPS --public-url.")
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            ssl_context.load_cert_chain(options.tls_cert, options.tls_key)
+        except OSError as exc:
+            parser.error(f"Could not load the HTTPS certificate and key: {exc}")
     logging.basicConfig(level=logging.INFO)
     try:
-        asyncio.run(serve(options, origin))
+        asyncio.run(serve(options, origin, ssl_context))
     except KeyboardInterrupt:
         pass
 

@@ -72,7 +72,9 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
             model = prefs.getString("model", "pipiclaw").orEmpty(),
             key = prefs.getString("credential", null)?.let(vault::decrypt).orEmpty(),
             language = SpeechLanguage.valueOf(prefs.getString("language", SpeechLanguage.CHINESE.name)!!),
-            recognitionSource = recognitionSource
+            recognitionSource = recognitionSource,
+            speechOutput = SpeechOutput.entries.find { it.name == prefs.getString("speech_output", null) }
+                ?: SpeechOutput.SYSTEM
         )
     }
 
@@ -80,7 +82,7 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
         val editor = prefs.edit().putString("provider", settings.provider.name)
             .putString("url", settings.url.toString()).putString("model", settings.model)
             .putString("language", settings.language.name).putString("recognition_source", settings.recognitionSource.name)
-            .remove("local_recognition")
+            .putString("speech_output", settings.speechOutput.name).remove("local_recognition")
         if (settings.key.isEmpty()) editor.remove("credential")
         else editor.putString("credential", vault.encrypt(settings.key))
         check(editor.commit())
