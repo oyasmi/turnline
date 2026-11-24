@@ -4,9 +4,13 @@ version = "1.0.0"
 description = "Local voice calls with Pipiclaw and bilingual Matcha"
 requires-python = ">=3.11"
 dependencies = [
-  "aiohttp>=3.13,<4",
+  "anyio>=4,<5",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
   "numpy>=2,<3",
   "sherpa-onnx==2.0.3",
+  "uvicorn>=0.35,<1",
+  "websockets>=15,<17",
 ]
 
 [tool.uv]

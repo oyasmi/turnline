@@ -1,9 +1,10 @@
-"""Local SenseVoice recognition and speech synthesis."""
+"""Local SenseVoice recognition and Matcha speech synthesis."""
 
+import asyncio
 from functools import cached_property
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic
 
 import numpy as np
@@ -84,6 +85,12 @@ class SpeechModels:
         with self.synthesis_lock:
             return self.matcha[0].num_speakers
 
+    def warm_recognition(self):
+        self.recognize(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
+
+    def warm_synthesis(self):
+        self.synthesize("你好，hello。", 0, Event(), lambda *_: True)
+
     def recognize(self, samples):
         with self.recognition_lock:
             recognizer = self.recognizer
@@ -122,6 +129,40 @@ class SpeechModels:
             voice.generate(spoken_english(text, words), config, callback=on_pcm)
             if not has_audio and not cancelled.is_set():
                 raise RuntimeError("语音模型未生成可播放音频。请重试或改用文字。")
+
+
+class RecognitionQueue:
+    def __init__(self, models):
+        self.models = models
+        self.slot = asyncio.Lock()
+        self.waiting = 0
+
+    async def transcribe(self, samples, is_current):
+        if self.waiting >= 2:
+            raise ValueError("语音识别繁忙，请稍后重新开始通话。")
+        self.waiting += 1
+        try:
+            await self.slot.acquire()
+        finally:
+            self.waiting -= 1
+        if not is_current():
+            self.slot.release()
+            return None
+
+        loop = asyncio.get_running_loop()
+        try:
+            worker = loop.run_in_executor(None, self.models.recognize, samples)
+        except BaseException:
+            self.slot.release()
+            raise
+
+        def finished(result):
+            self.slot.release()
+            if not result.cancelled():
+                result.exception()
+
+        worker.add_done_callback(finished)
+        return await asyncio.shield(worker)
 
 
 class ListeningTurn:

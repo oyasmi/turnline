@@ -11,7 +11,7 @@
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="brand" href="./" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
+      <a id="home" class="brand" href="/" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
       <div class="top-actions">
         <span id="backend-label" data-connection="checking" class="backend" role="status"><i aria-hidden="true"></i>正在连接</span>
         <button id="open-settings" type="button" class="button ghost">通话设置</button>
@@ -21,8 +21,14 @@
 
   <main>
     <section id="connection-panel" class="connection-panel" aria-label="连接状态">
-      <p id="connection-detail">正在检查本机 Pipiclaw。</p>
+      <p id="connection-detail">正在检查连接。</p>
       <button id="retry-connection" type="button" class="button subtle" hidden>重试连接</button>
+      <button id="setup-direct" type="button" class="button subtle" hidden>设置直连</button>
+      <form id="pair-form" class="connection-form" hidden>
+        <label class="sr-only" for="pair-code">一次性配对码</label>
+        <input id="pair-code" placeholder="粘贴一次性配对码" maxlength="43" autocomplete="off" spellcheck="false" required>
+        <button class="button primary" type="submit">配对</button>
+      </form>
     </section>
 
     <div class="workspace">
@@ -113,8 +119,31 @@
         </label>
       </div>
       <div class="dialog-actions">
+        <a id="switch-mode" class="button subtle" href="/direct" hidden>浏览器直连</a>
+        <button id="edit-direct" class="button subtle" type="button" hidden>直连设置</button>
         <button id="sign-out" class="button subtle" type="button" hidden>解除设备配对</button>
         <button class="button primary" type="submit">保存设置</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="direct-settings">
+    <form id="direct-form">
+      <header class="panel-heading">
+        <h2>浏览器直连 Pipiclaw</h2>
+        <button id="close-direct" class="button subtle" type="button">关闭</button>
+      </header>
+      <div class="fields">
+        <label>Pipiclaw 地址
+          <input id="direct-url" type="url" placeholder="https://pipi.local:8787" autocomplete="off" spellcheck="false" required>
+        </label>
+        <label>Pipiclaw Key
+          <input id="direct-key" type="password" placeholder="pk_…" autocomplete="off" spellcheck="false" required>
+        </label>
+      </div>
+      <p id="direct-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="forget-direct" class="button subtle" type="button" hidden>清除 Key</button>
+        <button id="test-direct" class="button primary" type="submit">测试并连接</button>
       </div>
     </form>
   </dialog>

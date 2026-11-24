@@ -1,6 +1,7 @@
 import { captureMicrophone, clock, RecognizerConnection, speechServer, SpeechPlayer } from './audio.js';
 import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
-import { createConversation, isBackchannel, listConversationItems, openResponse, splitSpeech } from './responses.js';
+import { checkDirectConnection, createConversation, isBackchannel, listConversationItems, normalizeDirectUrl,
+  openResponse, splitSpeech } from './responses.js';
 import { CallTrace } from './call-trace.js';
 import { VoiceTurn } from './voice-turn.js';
 
@@ -24,6 +25,11 @@ const field = $('message');
 const dialog = $('settings');
 const PREFERENCES = 'turnline.preferences.v1';
 const ACTIVE_CONVERSATION = 'turnline.active-conversation.v1';
+const DIRECT_ADDRESS = 'turnline.direct-address.v1';
+const DIRECT_CREDENTIALS = 'turnline.direct-credentials.v1';
+const directMode = location.pathname === '/direct';
+const directDialog = $('direct-settings');
+const relay = { mode: 'relay', url: '/api/pipiclaw/v1', model: 'pipiclaw', context: 'conversation' };
 
 function stored(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -33,6 +39,24 @@ function store(key, value) {
   try {
     if (value === undefined) localStorage.removeItem(key);
     else localStorage.setItem(key, value);
+  } catch {}
+}
+
+function directSettings() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(DIRECT_CREDENTIALS));
+    const url = normalizeDirectUrl(saved?.url || stored(DIRECT_ADDRESS) || '', location.origin);
+    return { mode: 'direct', url, key: saved?.url === url ? saved.key : '' };
+  } catch {
+    return { mode: 'direct', url: '', key: '' };
+  }
+}
+
+function saveDirectSettings(url, key) {
+  store(DIRECT_ADDRESS, url);
+  try {
+    if (key) sessionStorage.setItem(DIRECT_CREDENTIALS, JSON.stringify({ url, key }));
+    else sessionStorage.removeItem(DIRECT_CREDENTIALS);
   } catch {}
 }
 
@@ -51,10 +75,13 @@ function preferences() {
 }
 
 let settings = {
-  ...preferences(), url: '/api/pipiclaw/v1', model: 'pipiclaw', context: 'conversation', voice: 0,
+  ...preferences(), ...relay, ...(directMode ? directSettings() : {}), voice: 0,
 };
 let connection = 'checking';
+let connectionDetail;
 let connectionGeneration = 0;
+let sessionPaired = false;
+let relayAvailable = false;
 let conversation;
 let opening;
 let updates;
@@ -72,7 +99,7 @@ let ttsReady = false;
 let interruption = '';
 let history = [];
 
-let endpointAt;
+const endpoints = new Map();
 const voiceTurn = new VoiceTurn((text, timing) => void send(text, timing), render);
 const trace = new CallTrace({ getItem: stored, setItem: store }, count => {
   $('export-timing').disabled = !count;
@@ -105,18 +132,25 @@ function setMetric(current, name, value) {
 
 function renderConnection() {
   const { label, detail } = {
-    checking: { label: '正在连接', detail: '正在检查本机 Pipiclaw。' },
+    checking: { label: '正在连接', detail: '正在检查连接。' },
     ready: { label: 'Pipiclaw 已连接', detail: '' },
-    pair: { label: '等待配对', detail: '在运行 Turnline 的机器上生成配对链接，然后在此设备打开。' },
-    offline: { label: 'Pipiclaw 离线', detail: '请启动本机 Pipiclaw，再重试连接。' },
+    pair: { label: '等待配对', detail: '打开配对链接，或从 Turnline 服务端获取一次性配对码。' },
+    setup: { label: '等待设置', detail: '填写你自己的 Pipiclaw 地址和 Key。' },
+    offline: { label: 'Pipiclaw 离线', detail: '请启动 Pipiclaw，再重试连接。' },
     demo: { label: '离线演示', detail: '' },
   }[connection];
   $('backend-label').dataset.connection = connection;
   $('backend-label').lastChild.textContent = label;
   $('connection-panel').hidden = !detail;
-  $('connection-detail').textContent = detail;
-  $('retry-connection').hidden = connection === 'checking' || connection === 'pair';
-  $('sign-out').hidden = connection !== 'ready' && connection !== 'offline';
+  $('connection-detail').textContent = connectionDetail ?? detail;
+  $('retry-connection').hidden = connection !== 'offline';
+  $('pair-form').hidden = connection !== 'pair';
+  $('setup-direct').hidden = !directMode || !sessionPaired || !['setup', 'offline'].includes(connection);
+  $('edit-direct').hidden = !directMode || !sessionPaired;
+  $('sign-out').hidden = !sessionPaired;
+  $('switch-mode').hidden = !relayAvailable;
+  $('switch-mode').href = directMode ? '/' : '/direct';
+  $('switch-mode').textContent = directMode ? '服务端中转' : '浏览器直连';
   render();
 }
 
@@ -128,7 +162,8 @@ function watchConversation(id, cursor) {
 }
 
 async function restoreConversation(generation) {
-  const id = stored(ACTIVE_CONVERSATION);
+  const key = conversationKey();
+  const id = stored(key);
   if (!/^conv_[a-f0-9]{32}$/.test(id ?? '') || conversation) return;
   try {
     const page = await listConversationItems(settings, id, undefined, AbortSignal.timeout(5_000), 'desc');
@@ -143,34 +178,62 @@ async function restoreConversation(generation) {
     }
     watchConversation(id, page.data[0]?.id);
   } catch (error) {
-    if (generation === connectionGeneration && !conversation && error.status === 404) store(ACTIVE_CONVERSATION);
+    if (generation === connectionGeneration && !conversation && error.status === 404) store(key);
   }
 }
 
-async function refreshConnection(pairing) {
+function conversationKey() {
+  return directMode ? ACTIVE_CONVERSATION + ':' + settings.url : ACTIVE_CONVERSATION;
+}
+
+function directFailure(error) {
+  return error.status === 401 ? 'Pipiclaw 拒绝了这把 Key，请核对或更换 Key。' : error.message;
+}
+
+async function refreshConnection(pairing, directChecked = false) {
   const generation = ++connectionGeneration;
-  const signal = AbortSignal.timeout(7_000);
   connection = 'checking';
+  connectionDetail = undefined;
   renderConnection();
   try {
     if (pairing) {
       const paired = await fetch('/api/pair', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: pairing }), signal,
+        body: JSON.stringify({ token: pairing }), signal: AbortSignal.timeout(7_000),
       });
       if (generation !== connectionGeneration) return;
-      if (!paired.ok) showError('配对链接已使用或失效。请生成新的链接。');
+      if (!paired.ok) showError('配对码已使用或失效，请生成新的配对码。');
     }
-    const response = await fetch('/api/session', { signal, cache: 'no-store' });
+    const path = directMode ? '/api/session?mode=direct' : '/api/session';
+    const response = await fetch(path, { signal: AbortSignal.timeout(7_000), cache: 'no-store' });
     if (!response.ok) throw new Error('Connection check failed.');
-    const { connection: state } = await response.json();
-    if (!['pair', 'ready', 'offline', 'demo'].includes(state)) throw new Error('Bad connection state.');
+    const { connection: state, relay: available } = await response.json();
+    if (!['pair', 'ready', 'offline', 'demo', 'direct'].includes(state)) throw new Error('Bad connection state.');
     if (generation !== connectionGeneration) return;
+    relayAvailable = available === true;
+    sessionPaired = state !== 'pair' && state !== 'demo';
     connection = state;
-    if (state === 'demo') settings = { ...settings, model: 'demo', url: '/demo/v1', context: 'history' };
-    if (state === 'ready') await restoreConversation(generation);
+    if (state === 'demo') settings = { ...settings, mode: 'demo', model: 'demo', url: '/demo/v1', context: 'history' };
+    if (state === 'direct') {
+      connection = 'setup';
+      if (settings.url && settings.key) {
+        try {
+          if (!directChecked) await checkDirectConnection(settings, AbortSignal.timeout(7_000));
+          if (generation !== connectionGeneration) return;
+          connection = 'ready';
+        } catch (error) {
+          if (generation !== connectionGeneration) return;
+          connection = 'offline';
+          connectionDetail = directFailure(error);
+        }
+      }
+    }
+    if (connection === 'ready') await restoreConversation(generation);
   } catch {
-    if (generation === connectionGeneration) connection = 'offline';
+    if (generation === connectionGeneration) {
+      connection = 'offline';
+      connectionDetail = '无法连接 Turnline，请检查当前页面的访问地址。';
+    }
   }
   if (generation === connectionGeneration) renderConnection();
 }
@@ -189,11 +252,12 @@ function ensureConversation() {
   if (opening) return opening.promise;
   const controller = new AbortController();
   const attempt = { controller };
+  const key = conversationKey();
   opening = attempt;
   attempt.promise = createConversation(settings, controller.signal).then(id => {
     if (opening !== attempt) throw new DOMException('Conversation changed', 'AbortError');
     conversation = id;
-    store(ACTIVE_CONVERSATION, id);
+    store(key, id);
     watchConversation(id);
     return id;
   }).finally(() => {
@@ -258,7 +322,7 @@ function updateListening(force = false) {
   releaseBarge();
   voiceTurn.reset();
   micEpoch++;
-  endpointAt = undefined;
+  endpoints.clear();
   if (call?.ready) asr.reset(micEpoch, settings.silence);
 }
 
@@ -440,10 +504,11 @@ function onRecognition(event) {
   } else if (event.type === 'speech-end') {
     speakingUser = false;
     recognizing = true;
-    endpointAt = clock();
+    endpoints.set(event.segment, clock());
   } else if (event.type === 'transcript') {
-    speakingUser = false;
-    recognizing = false;
+    const endpointAt = endpoints.get(event.segment);
+    endpoints.delete(event.segment);
+    recognizing = endpoints.size > 0;
     const text = event.text.trim();
     if (text && !isBackchannel(text)) {
       voiceTurn.accept(text, { endpointAt: endpointAt ?? clock(), asrMs: event.asrMs });
@@ -650,8 +715,16 @@ async function send(text, timing) {
       trace.finish(current.traceItem, 'failed', clock() - current.startedAt);
       if (error.status === 401) {
         hangUp();
-        newSession();
-        connection = 'pair';
+        newSession({ forget: false });
+        if (directMode) {
+          saveDirectSettings(settings.url, '');
+          settings = { ...settings, key: '' };
+          connection = 'setup';
+          connectionDetail = directFailure(error);
+        } else {
+          sessionPaired = false;
+          connection = 'pair';
+        }
         renderConnection();
       }
     }
@@ -662,10 +735,10 @@ async function send(text, timing) {
   }
 }
 
-function newSession() {
+function newSession({ forget = true } = {}) {
   opening?.controller.abort();
   opening = undefined;
-  store(ACTIVE_CONVERSATION);
+  if (forget) store(conversationKey());
   updates?.stop();
   updates = undefined;
   pendingUpdates = [];
@@ -686,6 +759,71 @@ function openSettings() {
   $('duplex').checked = settings.duplex;
   dialog.showModal();
 }
+
+function openDirectSettings() {
+  dialog.close();
+  $('direct-url').value = settings.url;
+  $('direct-key').value = settings.key;
+  $('forget-direct').hidden = !settings.key;
+  showError(undefined, $('direct-error'));
+  directDialog.showModal();
+}
+
+let directAttempt;
+$('direct-form').onsubmit = async event => {
+  event.preventDefault();
+  if (directAttempt) return;
+  const controller = new AbortController();
+  directAttempt = controller;
+  $('test-direct').disabled = true;
+  showError(undefined, $('direct-error'));
+  try {
+    const url = normalizeDirectUrl($('direct-url').value, location.origin);
+    const key = $('direct-key').value.trim();
+    if (!key || /[^\x21-\x7e]/.test(key)) throw new Error('请输入完整的 Pipiclaw Key。');
+    const next = { mode: 'direct', url, key };
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(7_000)]);
+    await checkDirectConnection(next, signal);
+    if (controller.signal.aborted) return;
+    if (url !== settings.url || key !== settings.key) {
+      hangUp();
+      newSession({ forget: false });
+      settings = { ...settings, ...next };
+      saveDirectSettings(url, key);
+    }
+    directDialog.close();
+    void refreshConnection(undefined, true);
+  } catch (error) {
+    if (!controller.signal.aborted) showError(directFailure(error), $('direct-error'));
+  } finally {
+    directAttempt = undefined;
+    $('test-direct').disabled = false;
+  }
+};
+directDialog.onclose = () => {
+  directAttempt?.abort();
+  $('direct-key').value = '';
+};
+$('close-direct').onclick = () => directDialog.close();
+$('setup-direct').onclick = openDirectSettings;
+$('edit-direct').onclick = openDirectSettings;
+$('forget-direct').onclick = () => {
+  hangUp();
+  newSession({ forget: false });
+  saveDirectSettings(settings.url, '');
+  settings = { ...settings, key: '' };
+  directDialog.close();
+  void refreshConnection();
+};
+$('pair-form').onsubmit = event => {
+  event.preventDefault();
+  const code = $('pair-code').value.trim();
+  $('pair-code').value = '';
+  if (code) {
+    showError();
+    void refreshConnection(code);
+  }
+};
 
 $('open-settings').onclick = openSettings;
 $('close-settings').onclick = () => dialog.close();
@@ -711,6 +849,10 @@ $('sign-out').onclick = async () => {
     dialog.close();
     hangUp();
     newSession();
+    if (directMode) {
+      saveDirectSettings(settings.url, '');
+      settings = { ...settings, key: '' };
+    }
     void refreshConnection();
   } catch {
     showError('退出失败，请重试。');
@@ -737,5 +879,6 @@ setInterval(updateDuration, 250);
 window.addEventListener('pagehide', hangUp);
 window.addEventListener('hashchange', acceptPairingLink);
 trace.save();
+if (directMode) $('home').href = '/direct';
 if (!acceptPairingLink()) void refreshConnection();
 render();

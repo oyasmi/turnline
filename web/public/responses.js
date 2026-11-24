@@ -46,9 +46,29 @@ export async function* readEvents(stream) {
   }
 }
 
-async function request(url, body, signal) {
+export function normalizeDirectUrl(value, turnlineOrigin) {
+  let url;
+  try { url = new URL(value.trim()); } catch { throw new Error('请输入完整的 Pipiclaw 地址，例如 https://pipi.local:8787。'); }
+  const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(loopback && url.protocol === 'http:')) {
+    throw new Error('局域网地址请使用 HTTPS。本机可使用 http://127.0.0.1:8787。');
+  }
+  if (url.origin === turnlineOrigin || url.username || url.password || url.search || url.hash ||
+      !['/', '/v1', '/v1/'].includes(url.pathname)) {
+    throw new Error('请填写 Pipiclaw 的服务地址或 /v1 地址，密钥请单独填写。');
+  }
+  return url.origin + '/v1';
+}
+
+async function request(settings, path, body, signal) {
+  const url = settings.url + path;
   const headers = {};
   const options = { headers, signal, redirect: 'error' };
+  if (settings.mode === 'direct') {
+    headers.authorization = 'Bearer ' + settings.key;
+    options.credentials = 'omit';
+    if (url.startsWith('http:')) options.targetAddressSpace = 'loopback';
+  }
   if (body !== undefined) {
     headers['content-type'] = 'application/json';
     options.method = 'POST';
@@ -58,8 +78,10 @@ async function request(url, body, signal) {
   try {
     response = await fetch(url, options);
   } catch (error) {
-    if (signal.aborted) throw error;
-    throw new Error('无法连接后端。请检查 Base URL、网络和后端 CORS 设置。');
+    if (signal?.aborted && signal.reason?.name !== 'TimeoutError') throw error;
+    throw new Error(settings.mode === 'direct'
+      ? '无法连接 Pipiclaw。请检查地址、HTTPS 证书和浏览器的本地网络权限。'
+      : '无法连接后端。请检查 Turnline 与 Pipiclaw 是否可用。');
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
@@ -70,8 +92,14 @@ async function request(url, body, signal) {
   return response;
 }
 
+export async function checkDirectConnection(settings, signal) {
+  const response = await request(settings, '/models/pipiclaw', undefined, signal);
+  const model = await response.json().catch(() => null);
+  if (model?.id !== 'pipiclaw') throw new Error('该地址未返回 Pipiclaw 模型。请检查服务地址。');
+}
+
 export async function createConversation(settings, signal) {
-  const response = await request(settings.url + '/conversations', {}, signal);
+  const response = await request(settings, '/conversations', {}, signal);
   const { id } = await response.json();
   if (typeof id !== 'string' || !id) throw new Error('后端没有返回会话 ID。');
   return id;
@@ -80,7 +108,7 @@ export async function createConversation(settings, signal) {
 export async function listConversationItems(settings, conversation, after, signal, order = 'asc') {
   const query = new URLSearchParams({ order, limit: '50' });
   if (after) query.set('after', after);
-  const response = await request(settings.url + '/conversations/' + encodeURIComponent(conversation) + '/items?' + query,
+  const response = await request(settings, '/conversations/' + encodeURIComponent(conversation) + '/items?' + query,
     undefined, signal);
   const page = await response.json();
   if (!Array.isArray(page.data) || typeof page.has_more !== 'boolean') throw new Error('会话消息格式无效。');
@@ -94,7 +122,7 @@ export async function openResponse(settings, { conversation, messages, text, voi
     ...(voice ? { instructions: [CALL_INSTRUCTIONS, settings.instructions, interruption].filter(Boolean).join('\n') } : {}),
     ...(conversation ? { conversation, input: text } : { store: false, input: messages }),
   };
-  const response = await request(settings.url + '/responses', body, signal);
+  const response = await request(settings, '/responses', body, signal);
   if (!response.headers.get('content-type')?.includes('text/event-stream')) {
     throw new Error('后端没有返回 SSE。请检查该地址是否支持流式 Responses API。');
   }

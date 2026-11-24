@@ -4,12 +4,14 @@ from contextlib import aclosing
 from threading import Event
 from time import monotonic
 
-from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from fastapi import FastAPI, Request
+import httpx
 
 from server import tts
 from pronunciation import spoken_english
+from speech import RecognitionQueue
 from synthesis import SynthesisBusy, SynthesisQueue
+from support import running
 
 
 class EnglishSpeechTest(unittest.TestCase):
@@ -18,6 +20,40 @@ class EnglishSpeechTest(unittest.TestCase):
         text = spoken_english("你好 Hello Kubernetes Zebrix-world", words)
         self.assertEqual(text.split(), ["你好", "hello", "kubernetes", "z", "e", "b", "r", "i", "x", "world"])
         self.assertEqual(spoken_english("37 percent.", words), "thirty seven percent.")
+
+
+class RecognitionQueueTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reset_skips_queued_audio_and_disconnect_keeps_the_native_slot(self):
+        started, release = Event(), Event()
+        calls = []
+        current = True
+
+        class Models:
+            def recognize(self, segment):
+                calls.append(segment)
+                if segment == "running":
+                    started.set()
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("test did not release recognition")
+                return segment
+
+        queue = RecognitionQueue(Models())
+        running_job = asyncio.create_task(queue.transcribe("running", lambda: True))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            stale = asyncio.create_task(queue.transcribe("stale", lambda: current))
+            fresh = asyncio.create_task(queue.transcribe("fresh", lambda: True))
+            await asyncio.sleep(0)
+            current = False
+            running_job.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await running_job
+            self.assertFalse(fresh.done())
+        finally:
+            release.set()
+        self.assertIsNone(await asyncio.wait_for(stale, 5))
+        self.assertEqual(await asyncio.wait_for(fresh, 5), "fresh")
+        self.assertEqual(calls, ["running", "fresh"])
 
 
 class SynthesisQueueTest(unittest.IsolatedAsyncioTestCase):
@@ -62,29 +98,41 @@ class SynthesisQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(next_turn, 5), [b"next"])
         self.assertEqual(ran, ["old", "next"])
 
-    async def test_disconnected_http_stream_stops_native_work(self):
+    async def test_disconnected_http_stream_stops_native_work_before_and_after_first_chunk(self):
+        started = Event()
         stopped = Event()
         pcm = b"\x00\x00\x80\x3f"
 
         class Models:
+            voice_choices = ((0, "Matcha"),)
+
             def synthesize(self, text, speaker, cancelled, publish):
+                started.set()
                 now = monotonic()
-                publish(pcm, 16_000, now, now)
-                if text == "old" and cancelled.wait(timeout=5):
+                if text != "before":
+                    publish(pcm, 16_000, now, now)
+                if text != "new" and cancelled.wait(timeout=5):
                     stopped.set()
 
         queue = SynthesisQueue(Models())
-        app = web.Application()
+        app = FastAPI()
 
-        async def generate(request):
+        @app.post("/synthesize")
+        async def generate(request: Request):
             return await tts(request, queue)
 
-        app.router.add_post("/synthesize", generate)
-        async with TestClient(TestServer(app, handler_cancellation=True)) as client:
-            old = await asyncio.wait_for(client.post("/synthesize", json={"text": "old", "speaker": 0}), 5)
-            self.assertIn("tts-first-pcm", old.headers["Server-Timing"])
-            self.assertEqual(await asyncio.wait_for(old.content.readexactly(4), 5), pcm)
-            old.close()
+        async with running(app) as origin, httpx.AsyncClient(base_url=origin, timeout=5) as client:
+            before = asyncio.create_task(client.post("/synthesize", json={"text": "before", "speaker": 0}))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            before.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await before
             self.assertTrue(await asyncio.to_thread(stopped.wait, 5))
-            fresh = await asyncio.wait_for(client.post("/synthesize", json={"text": "new", "speaker": 0}), 5)
-            self.assertEqual(await asyncio.wait_for(fresh.read(), 5), pcm)
+            stopped.clear()
+
+            async with client.stream("POST", "/synthesize", json={"text": "old", "speaker": 0}) as old:
+                self.assertIn("tts-first-pcm", old.headers["Server-Timing"])
+                self.assertEqual(await anext(old.aiter_bytes()), pcm)
+            self.assertTrue(await asyncio.to_thread(stopped.wait, 5))
+            fresh = await client.post("/synthesize", json={"text": "new", "speaker": 0})
+            self.assertEqual(fresh.content, pcm)

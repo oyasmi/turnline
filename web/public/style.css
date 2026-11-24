@@ -47,6 +47,8 @@ button:disabled { cursor: default; opacity: .45; }
 
 main { width: min(100% - 48px, 1160px); margin: clamp(22px, 4vw, 44px) auto 36px; }
 .connection-panel { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; padding: 12px 16px; background: #eaf3ee; border: 1px solid #d4e5dd; border-radius: 12px; color: #34594d; }
+.connection-form { display: flex; flex: 1 1 240px; gap: 8px; }
+.connection-form input { flex: 1; min-width: 0; }
 .workspace { display: grid; grid-template-columns: minmax(0, .87fr) minmax(0, 1.13fr); gap: 18px; }
 .call, .transcript { display: flex; min-width: 0; flex-direction: column; border-radius: 20px; overflow: hidden; }
 .call {
@@ -91,6 +93,7 @@ h1, h2 { font-size: 16px; font-weight: 680; }
 .button.ghost { border-color: var(--line); background: #fff; }
 .button.ghost:hover:not(:disabled), .button.subtle:hover:not(:disabled) { background: #eef5f1; }
 .button.subtle { color: var(--accent); }
+a.button { text-decoration: none; }
 .button.primary { background: #165d4b; color: #fff; }
 .button.primary:hover:not(:disabled), .button.send:hover:not(:disabled) { filter: brightness(.93); }
 .call .button.primary { min-height: 50px; background: var(--mint); color: #0f3d2e; font-size: 16px; }
@@ -114,7 +117,7 @@ h1, h2 { font-size: 16px; font-weight: 680; }
 .entry[data-interrupted="true"] .flag { display: inline; }
 .error { padding: 0 18px 9px; color: #a12332; font-size: 13px; }
 .composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #edf2ef; }
-.composer input, select, textarea { border: 1px solid var(--line); color: var(--ink); background: var(--paper); border-radius: 8px; }
+.composer input, .connection-form input, .fields input:not([type="checkbox"]), select, textarea { border: 1px solid var(--line); color: var(--ink); background: var(--paper); border-radius: 8px; }
 .composer input { min-width: 0; flex: 1; padding: 8px 10px; }
 .button.send { color: #fff; background: #165d4b; }
 
@@ -135,9 +138,9 @@ dialog form { padding: 16px; }
 .fields label { display: grid; gap: 5px; font-size: 14px; }
 .fields .checkbox { grid-template-columns: auto 1fr; align-items: center; }
 .fields input[type="checkbox"] { accent-color: var(--accent); }
-select, textarea { width: 100%; padding: 7px 8px; }
+select, textarea, .connection-form input, .fields input:not([type="checkbox"]) { width: 100%; padding: 7px 8px; }
 textarea { resize: vertical; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 740px) {
   .topbar-inner, main { width: calc(100% - 24px); }

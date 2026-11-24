@@ -13,11 +13,11 @@ npm test
 npm run test:browser
 ```
 
-Python 测试使用本地 Unix socket 验证配对、会话隔离、SSE 转发与断开取消，也覆盖合成取消及英文拼读。JavaScript 测试覆盖音频分块、SSE、断句、播报文本和附和过滤。浏览器用离线演示、虚拟麦克风、真实语音模型和可控的会话消息验证通话行为。缺少 Chromium 时，可以用 `npx playwright install --only-shell chromium` 安装。
+Python 测试使用本地 Unix Socket 验证配对、会话隔离、SSE 转发与断开取消，也覆盖合成取消及英文拼读。JavaScript 测试覆盖音频分块、SSE、断句、播报文本和附和过滤。浏览器用离线演示、虚拟麦克风、真实语音模型和可控的会话消息验证通话行为。隧道用例通过本地 HTTPS 入口模拟两个域名，验证配对、WSS、音频流、直连 CORS 和 Key 的去向，需要 OpenSSL。缺少 Chromium 时，可以用 `npx playwright install --only-shell chromium` 安装。
 
 ## 实际通话
 
-1. 启动正式入口。未配对浏览器应显示「等待配对」。用 `uv run python server.py pair` 生成链接，局域网部署时带上服务相同的 `--public-url`。
+1. 启动正式入口。未配对浏览器应显示「等待配对」。本机用 `uv run python server.py pair` 生成链接。用 HTTPS 或隧道打开时，也可以运行 `uv run python server.py pair --code`，直接在当前页面配对。
 2. 打开链接，确认显示「Pipiclaw 已连接」。先发一条文字和一个只用于本次测试的代号，刷新后从麦克风问回代号。确认恢复对话、使用同一会话、听到正确的回复。
 3. 用自然速度说「你帮我看一下，现在」，略停，再说「这台主机空间还剩多少」。比较快速和自然断句。用「曹雪芹」「脂砚斋」验证专名，观察识别不确定时能否先确认。
 4. 播报时分别试纯附和、手动打断和开口打断。观察停播后是否从新问题继续。耳机和外放应分开测，记录误触发和漏检。

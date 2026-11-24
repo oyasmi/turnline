@@ -6,7 +6,7 @@ export class RecognizerConnection {
   }
 
   connect() {
-    const url = new URL('./speech/listen', location.href);
+    const url = new URL('/speech/listen', location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url);
     this.socket = socket;
@@ -65,7 +65,7 @@ async function requestSpeech(path, body, signal) {
     options.headers = { 'Content-Type': 'application/json' };
     options.body = JSON.stringify(body);
   }
-  const response = await fetch('./speech/' + path, options);
+  const response = await fetch('/speech/' + path, options);
   if (!response.ok) {
     const result = await response.json().catch(() => null);
     throw new Error(result?.error?.message ?? '语音服务请求失败，请检查 Python 服务。');
