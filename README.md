@@ -2,6 +2,8 @@
 
 Turnline 是连接本机 Pipiclaw 的语音通话界面。浏览器负责麦克风、播报与对话记录。Turnline 在本机识别语音，调用 Pipiclaw 处理文字，再用同一个 Matcha 音色播报中文、英文和中英混读。
 
+原生 **Android 版**可通过 HTTP 或 HTTPS 直连 PipiClaw 或兼容 Responses API 的服务，使用手机的语音识别和播报。构建和连接说明见 [Android 客户端](android/README.md)。
+
 ## 启动
 
 要求 Python 3.11 或更新版本及正在运行的 Pipiclaw。语音模型在服务器 CPU 上运行。
