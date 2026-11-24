@@ -75,6 +75,7 @@ class TurnEngine:
         self.overlap_until = 0
         self.monitored_onset = None
         self.mode = "off"
+        self.manual = False
         self.speed = "balanced"
         self.expecting_answer = False
         self.epoch = 0
@@ -262,8 +263,9 @@ class TurnEngine:
                 turn.final_ready = True
                 turn.wait_ms = endpoint_wait(turn.text, turn.voiced / SAMPLE_RATE, self.speed,
                                              self.expecting_answer) if turn.text else 0
-                await self.event("tentative", turn, text=turn.text, voiceEndSample=turn.last_end,
-                                 waitMs=turn.wait_ms, voicedMs=round((turn.last_end - turn.start) / 16))
+                if not self.manual:
+                    await self.event("tentative", turn, text=turn.text, voiceEndSample=turn.last_end,
+                                     waitMs=turn.wait_ms, voicedMs=round((turn.last_end - turn.start) / 16))
                 await self.maybe_commit(turn, self.cursor)
 
     async def maybe_commit(self, turn, at, frame=None):
@@ -272,7 +274,7 @@ class TurnEngine:
         silence_ms = round((at - turn.last_end) / 16)
         # Give Silero time to confirm a new onset detected near the deadline.
         if not turn.force:
-            if silence_ms < turn.wait_ms or self.vad.detecting:
+            if self.manual or silence_ms < turn.wait_ms or self.vad.detecting:
                 return
             if frame is not None and silence_ms < turn.wait_ms + 160 and np.sqrt(np.mean(frame**2)) > 0.012:
                 return

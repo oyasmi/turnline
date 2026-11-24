@@ -59,6 +59,7 @@ class VoiceSession:
                     raise ValueError("无效的反应速度。")
                 self.input.speed = speed
                 self.input.expecting_answer = data.get("expectingAnswer") is True
+                self.input.manual = data.get("manual") is True
             elif kind == "reset":
                 self.input.reset(integer(data.get("epoch"), 0xffffffff))
             elif kind == "capture":
@@ -68,7 +69,10 @@ class VoiceSession:
                     raise ValueError("无效的收音模式。")
                 await self.input.set_mode(mode, None if tail is None else integer(tail, 2**53 - 1))
             elif kind == "force-commit":
-                await self.input.force_commit()
+                if data.get("release") is True and self.input.turn is None:
+                    await self.send({"type": "hold-empty", "epoch": self.input.epoch})
+                else:
+                    await self.input.force_commit()
             elif kind == "discard-input":
                 self.input.discard(integer(data.get("input"), 0xffffffff))
             elif kind == "say":

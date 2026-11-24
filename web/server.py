@@ -249,6 +249,14 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
             raise HTTPException(401, "浏览器会话尚未就绪，请刷新页面后重试。")
         return identity
 
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"], include_in_schema=False)
+    async def favicon():
+        return FileResponse(PUBLIC / "icons" / "favicon.ico", media_type="image/x-icon")
+
+    @app.get("/service-worker.js", include_in_schema=False)
+    async def service_worker():
+        return FileResponse(PUBLIC / "service-worker.js", media_type="text/javascript")
+
     @app.api_route("/", methods=["GET", "HEAD"])
     async def index():
         return RedirectResponse("/direct") if direct_only else FileResponse(PUBLIC / "index.html")

@@ -11,6 +11,7 @@ npm ci
 uv run --no-sync python -m unittest discover -s test
 npm test
 npm run test:browser
+npm run test:interface
 ```
 
 Python 测试覆盖自适应断句、长口述、立即提交、会话隔离和合成后的识别回听。JavaScript 测试覆盖状态机、分句、SSE 和回声文字比对。浏览器测试使用真实语音模型和虚拟麦克风，验证字幕、句中停顿、长口述、播报尾部接话、插话与恢复、语音通道重连和 Pipiclaw 会话串行提交。转发用例需要 OpenSSL，以本地 HTTPS 模拟两个地址，检查 WSS、直连 CORS 和 Key 的去向。缺少 Chromium 时，可用 `npx playwright install --only-shell chromium` 安装。
@@ -49,3 +50,9 @@ TURNLINE_TEST_ECHO_SECONDS=600 npm run test:browser
 - `outcome` 记录完成、失败或取消。正文完成后打断播报会记录为 `playback_interrupted`。
 
 用同一设备、音量、网络和音色比较多轮分布，分别记录冷启动、热态和实机回环。导出文件只含计时、状态和响应 ID。
+
+## 第二轮界面回归
+
+`npm run test:interface` 检查 1440×900、1280×720、390×844、360×640 四种尺寸的深浅主题，在空闲和等待提交状态对比 16 张截图。测试也覆盖缩小视口后的输入框、Markdown 链接、思考音、语音高亮与断点、按住说话和 axe 严重问题。用 `npm run test:interface -- --update-snapshots` 刷新基线。
+
+`npm test` 里的心跳回归模拟后台定时器间隔跳到 60 秒，检查恢复后先发探测，以及前台连续无响应时依然断开。滤波测试覆盖常见设备采样率、语音频段和高频混叠。实际 Android 设备上的外放、蓝牙和锁屏音频仍需现场验证。

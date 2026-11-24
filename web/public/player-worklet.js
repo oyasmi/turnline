@@ -19,7 +19,9 @@ class SpeechOutput extends AudioWorkletProcessor {
         this.turn = data.turn;
         this.reporting = true;
       } else if (data.type === 'tone') {
-        this.tones.push({ audio: data.audio, offset: 0 });
+        this.tones.push({ kind: data.kind, audio: data.audio, offset: 0, gain: 1 });
+      } else if (data.type === 'stop-tone') {
+        for (const tone of this.tones) if (tone.kind === data.kind) tone.fade = Math.round(sampleRate * .012);
       } else if (data.type === 'gain') {
         this.target = data.value;
         this.ramp = Math.max(1, Math.round(sampleRate * data.ms / 1000));
@@ -95,8 +97,12 @@ class SpeechOutput extends AudioWorkletProcessor {
       }
       squares += voice * voice;
       let tone = 0;
-      for (const entry of this.tones) tone += entry.audio[entry.offset++] ?? 0;
-      if (this.tones[0]?.offset >= this.tones[0]?.audio.length) this.tones.shift();
+      for (let index = this.tones.length - 1; index >= 0; index--) {
+        const entry = this.tones[index];
+        if (entry.fade) entry.gain -= entry.gain / entry.fade--;
+        tone += entry.audio[entry.offset++] * entry.gain;
+        if (!entry.gain || entry.offset >= entry.audio.length) this.tones.splice(index, 1);
+      }
       output[i] = voice + tone;
     }
     if (currentFrame >= this.nextReport) {

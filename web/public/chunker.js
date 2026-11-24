@@ -37,29 +37,49 @@ function openingEnd(text) {
   return 0;
 }
 
-function appendSpeech(phrases, source) {
-  // Drop potentially long, silent Markdown structures before transport.
-  const raw = source.replace(hiddenSpeech, (part, at) => source[at - 1] === ']' && part.startsWith('(') ? '' : ' ');
-  const paragraph = raw.endsWith('\n\n');
-  let text = raw.trim();
-  while (text.length > (paragraph ? 126 : 128)) {
-    const space = text.lastIndexOf(' ', 128);
-    let end = space >= 64 ? space : 128;
-    if (/[\uD800-\uDBFF]/u.test(text[end - 1])) end--;
-    const phrase = text.slice(0, end);
-    if (/[\p{L}\p{N}]/u.test(phrase)) phrases.push(phrase);
-    text = text.slice(end).trimStart();
+function appendSpeech(phrases, ranges, source, offset) {
+  // Track the source offsets even when links, code blocks, or whitespace are omitted.
+  let raw = '';
+  const positions = [];
+  let cursor = 0;
+  const append = (text, start) => {
+    raw += text;
+    if (ranges) for (let index = 0; index < text.length; index++) positions.push(offset + start + index);
+  };
+  for (const match of source.matchAll(hiddenSpeech)) {
+    append(source.slice(cursor, match.index), cursor);
+    if (!(source[match.index - 1] === ']' && match[0].startsWith('('))) append(' ', match.index);
+    cursor = match.index + match[0].length;
   }
-  if (/[\p{L}\p{N}]/u.test(text)) phrases.push(paragraph ? text + '\n\n' : text);
+  append(source.slice(cursor), cursor);
+  const paragraph = raw.endsWith('\n\n');
+  let from = raw.length - raw.trimStart().length;
+  const last = raw.trimEnd().length;
+  const push = (end, suffix = '') => {
+    const phrase = raw.slice(from, end);
+    if (!/[\p{L}\p{N}]/u.test(phrase)) return;
+    phrases.push(phrase + suffix);
+    ranges?.push({ start: positions[from], end: positions[end - 1] + 1, offsets: positions.slice(from, end) });
+  };
+  while (last - from > (paragraph ? 126 : 128)) {
+    const space = raw.lastIndexOf(' ', from + 128);
+    let end = space >= from + 64 ? space : from + 128;
+    if (/[\uD800-\uDBFF]/u.test(raw[end - 1])) end--;
+    push(end);
+    from = end + (/^\s*/u.exec(raw.slice(end))[0].length);
+  }
+  if (from < last) push(last, paragraph ? '\n\n' : '');
 }
 
-export function splitSpeech(text, flush = false, opening = false) {
+export function splitSpeech(text, flush = false, opening = false, mapped = false) {
   const phrases = [];
+  const ranges = mapped ? [] : undefined;
+  const result = () => mapped ? { phrases, rest, ranges } : { phrases, rest };
   let rest = text;
   if (opening && !flush) {
     const end = openingEnd(rest);
-    if (!end) return { phrases, rest };
-    appendSpeech(phrases, rest.slice(0, end));
+    if (!end) return result();
+    appendSpeech(phrases, ranges, rest.slice(0, end), text.length - rest.length);
     rest = rest.slice(end);
   }
   while (rest) {
@@ -84,8 +104,8 @@ export function splitSpeech(text, flush = false, opening = false) {
     }
     if (!end && flush) end = rest.length;
     if (!end) break;
-    appendSpeech(phrases, rest.slice(0, end));
+    appendSpeech(phrases, ranges, rest.slice(0, end), text.length - rest.length);
     rest = rest.slice(end);
   }
-  return { phrases, rest };
+  return result();
 }

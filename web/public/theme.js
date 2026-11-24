@@ -5,11 +5,17 @@
 
   function apply(theme) {
     root.dataset.theme = theme;
-    toolbarColor.content = theme === 'light' ? '#edf1ee' : '#111916';
+    const active = root.hasAttribute('data-in-call');
+    toolbarColor.content = theme === 'light' ? active ? '#f2e5ef' : '#f9f2ef' : active ? '#24192f' : '#17131f';
   }
 
-  try { apply(localStorage.getItem(key) === 'light' ? 'light' : 'dark'); }
-  catch { apply('dark'); }
+  const preferred = matchMedia('(prefers-color-scheme: light)');
+  let selected;
+  try { selected = localStorage.getItem(key); } catch {}
+  const update = () => apply(selected || (preferred.matches ? 'light' : 'dark'));
+  update();
+  preferred.addEventListener('change', update);
+  new MutationObserver(update).observe(root, { attributeFilter: ['data-in-call'] });
 
   document.addEventListener('DOMContentLoaded', () => {
     const toggle = document.getElementById('toggle-theme');
@@ -19,8 +25,10 @@
       toggle.title = name;
     }
     label();
+    preferred.addEventListener('change', label);
     toggle.onclick = () => {
       const theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+      selected = theme;
       apply(theme);
       label();
       try { localStorage.setItem(key, theme); } catch {}

@@ -8,7 +8,6 @@ export async function openCallAudio(started, voice, player, options) {
   const { signal } = started.controller;
   const playback = context.resume().then(() => { if (!signal.aborted) return player.open(context); });
   const recognition = voice.connect();
-  voice.configure(options.speed, options.expectingAnswer);
   const capture = context.audioWorklet.addModule(new URL('./mic-worklet.js', import.meta.url));
   const openMicrophone = async () => {
     const replacement = new AbortController();
@@ -30,6 +29,16 @@ export async function openCallAudio(started, voice, player, options) {
   await Promise.all([playback, recognition, capture.then(openMicrophone)]);
   if (signal.aborted) return;
   keepScreenAwake(signal);
+  const restore = () => {
+    void openMicrophone().catch(error => {
+      if (!signal.aborted && error.name !== 'AbortError') options.showError('无法恢复麦克风，请检查设备后重试。');
+    });
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (context.state !== 'running') void context.resume().catch(() => {});
+    if (!started.pendingMicrophone && !started.microphone?.active()) restore();
+  }, { signal });
   navigator.mediaDevices.addEventListener('devicechange', () => {
     void openMicrophone().catch(error => {
       if (!signal.aborted && error.name !== 'AbortError') options.showError('无法切换麦克风，请检查设备后重试。');

@@ -13,12 +13,18 @@ export class VoiceSession {
     this.times = new Map();
   }
 
-  async connect() {
+  connect() {
+    if (this.ready) return Promise.resolve();
+    if (this.connecting) return this.connecting;
     this.close();
     this.controller = new AbortController();
     this.epoch = 0;
     this.mode = 'off';
-    await this.open(this.controller.signal, 60_000);
+    const connection = this.open(this.controller.signal, 60_000).finally(() => {
+      if (this.connecting === connection) this.connecting = undefined;
+    });
+    this.connecting = connection;
+    return connection;
   }
 
   open(signal, limit) {
@@ -47,6 +53,7 @@ export class VoiceSession {
       signal.addEventListener('abort', abort, { once: true });
       socket.onmessage = ({ data }) => {
         if (this.socket !== socket || signal.aborted) return;
+        this.lastMessage = performance.now();
         if (typeof data !== 'string') {
           this.pcm(data);
           return;
@@ -56,7 +63,6 @@ export class VoiceSession {
           accepted = this.ready = true;
           this.frameCount = 0;
           this.times.clear();
-          this.lastPong = performance.now();
           this.send({ type: 'reset', epoch: this.epoch });
           if (this.options) this.send(this.options);
           this.send({ type: 'capture', mode: this.mode });
@@ -70,7 +76,8 @@ export class VoiceSession {
           this.startHeartbeat(socket);
           finish();
         } else if (event.type === 'pong') {
-          this.lastPong = performance.now();
+          if (this.pingSent !== undefined) this.onEvent({ type: 'rtt', ms: this.lastMessage - this.pingSent });
+          this.pingSent = undefined;
         } else if (event.type === 'fatal') {
           finish(new Error(event.message));
           this.close();
@@ -86,7 +93,10 @@ export class VoiceSession {
         if (this.socket !== socket || signal.aborted) return;
         this.ready = false;
         clearInterval(this.heartbeat);
-        if (accepted && !this.reconnecting) void this.reconnect(signal);
+        if (accepted && !this.reconnecting) {
+          if (this.inCall) void this.reconnect(signal);
+          else this.onEvent({ type: 'warm-disconnected' });
+        }
       };
       socket.onerror = () => socket.close();
     });
@@ -127,9 +137,20 @@ export class VoiceSession {
 
   startHeartbeat(socket) {
     clearInterval(this.heartbeat);
+    this.pingSent = undefined;
+    let lastTick = performance.now();
     this.heartbeat = setInterval(() => {
-      if (performance.now() - this.lastPong >= 10_000) socket.close();
-      else this.send({ type: 'ping' });
+      const now = performance.now();
+      const delayed = now - lastTick > 7_500;
+      lastTick = now;
+      // A delayed callback cannot distinguish a dead peer from a suspended tab.
+      // Give the socket a fresh probe before timing out again.
+      if (!delayed && this.pingSent !== undefined && now - Math.max(this.pingSent, this.lastMessage) >= 10_000) {
+        socket.close();
+      } else if (delayed || this.pingSent === undefined) {
+        this.pingSent = now;
+        this.send({ type: 'ping' });
+      }
     }, 5_000);
   }
 
@@ -137,8 +158,8 @@ export class VoiceSession {
     if (this.ready && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(event));
   }
 
-  configure(speed, expectingAnswer) {
-    this.options = { type: 'configure', speed, expectingAnswer };
+  configure(speed, expectingAnswer, manual = false) {
+    this.options = { type: 'configure', speed, expectingAnswer, manual };
     this.send(this.options);
   }
 
@@ -264,7 +285,7 @@ export class VoiceSession {
   close() {
     this.controller?.abort();
     this.socket?.close();
-    this.socket = undefined;
+    this.socket = this.connecting = undefined;
     this.ready = this.reconnecting = this.congested = this.lostFrames = this.lostSpeech = false;
     clearInterval(this.heartbeat);
     this.cancel(Infinity);

@@ -15,7 +15,7 @@ try {
     server.stdout.once('data', chunk => resolve(String(chunk).trim().split(' ').at(-1)));
   });
   browser = await chromium.launch({ channel: process.env.TURNLINE_TEST_BROWSER_CHANNEL });
-  const page = await browser.newPage();
+  const page = await browser.newPage({ colorScheme: 'dark' });
   page.setDefaultTimeout(20_000);
   const failures = new Set();
   const synthesisRequests = [];
@@ -163,7 +163,6 @@ try {
     );
   };
   const sendText = async text => {
-    if (!await page.locator('#composer').isVisible()) await page.getByRole('button', { name: '文字输入' }).click();
     await page.getByRole('textbox', { name: '文字消息' }).fill(text);
     await page.getByRole('button', { name: '发送', exact: true }).click();
   };
@@ -176,7 +175,7 @@ try {
 
   await page.goto(base);
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
-  assert.equal(await page.locator('#composer').isVisible(), false);
+  assert.equal(await page.locator('#composer').isVisible(), true);
   assert.equal(await page.locator('#diagnostics').isVisible(), false);
   await page.getByRole('button', { name: '使用浅色主题' }).click();
   await page.reload();
@@ -315,7 +314,7 @@ try {
   const beforeDictation = voiceEvents.length;
   const duration = await page.evaluate(() => window.loopTestUtterance(22));
   assert.ok(duration > 20, 'Long dictation fixture must exceed twenty seconds');
-  await waitForText('.entry.draft .content', /天气/);
+  await waitForText('#stage-caption', /天气/);
   await waitForText('#status', /正在聆听/, 45_000);
   assert.equal(voiceEvents.slice(beforeDictation).filter(event => event.type === 'commit').length, 1);
   assert.equal(await inputs(), afterHesitation + 1);
@@ -452,6 +451,26 @@ try {
     assert.ok(profile.duckP95 <= 150, 'Interruption duck P95 exceeded 150 ms');
     assert.ok(profile.pauseP95 <= 400, 'Interruption pause P95 exceeded 400 ms');
   }
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await page.locator('#input-mode').selectOption('hold');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await waitForText('#status', /等待你说话/);
+  await page.locator('#messages').focus();
+  const beforeHold = await inputs();
+  await page.keyboard.down('Space');
+  await page.evaluate(() => window.speakTestUtterance());
+  await waitForText('#stage-caption', /天气/);
+  await page.waitForTimeout(1500);
+  assert.equal(await inputs(), beforeHold, 'Holding past a pause must keep the input open');
+  await page.keyboard.up('Space');
+  await page.waitForFunction(count => document.querySelectorAll('.entry.user').length === count + 1, beforeHold);
+  await waitForText('#status', /等待你说话/);
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await page.locator('#input-mode').selectOption('auto');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await waitForText('#status', /正在聆听/);
+  console.log('Hold-to-talk kept a real recognition turn open until key release.');
+
   await page.getByRole('button', { name: '挂断' }).click();
   assert.equal(await page.getByRole('button', { name: '开始通话' }).isEnabled(), true);
 
@@ -530,7 +549,7 @@ try {
   await page.getByRole('button', { name: '开始通话' }).click();
   await waitForText('#status', /正在聆听/);
   await sendText('等待前一轮结束');
-  await waitForText('#status', /等待回复/);
+  await waitForText('#status', /等待回复|正在思考|正在查询/);
   await page.evaluate(() => window.speakTestUtterance());
   await waitForText('.entry.user:not(.draft) .content', /今天天气/);
   assert.equal(requests.length, 3, 'A continuation must wait for the previous stored response');

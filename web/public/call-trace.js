@@ -18,6 +18,18 @@ export class CallTrace {
     this.save();
   }
 
+  callMetric(name, value) {
+    if (this.started === undefined) return;
+    this.trace[name] = rounded(value);
+    this.save();
+  }
+
+  reconnect() {
+    if (this.started === undefined) return;
+    this.trace.reconnects = (this.trace.reconnects ?? 0) + 1;
+    this.save();
+  }
+
   begin(at, source) {
     if (this.started === undefined) return;
     const item = { offset_ms: rounded(at - this.started), source, outcome: 'pending', timing_ms: {} };
@@ -51,11 +63,15 @@ export class CallTrace {
     if (this.trace) {
       try { this.storage.setItem(STORAGE, JSON.stringify(this.trace)); } catch {}
     }
-    this.output(this.trace?.turns.length ?? 0);
+    this.output(this.trace?.turns.length ?? 0, this.available);
+  }
+
+  get available() {
+    return Boolean(this.trace?.turns.length || this.trace?.click_to_ready_ms !== undefined);
   }
 
   download() {
-    if (!this.trace?.turns.length) return;
+    if (!this.available) return;
     this.save();
     const url = URL.createObjectURL(new Blob([JSON.stringify(this.trace, null, 2)], { type: 'application/json' }));
     const anchor = document.createElement('a');

@@ -166,7 +166,6 @@ try {
   await waitFor('#backend-label', 'Pipiclaw 已连接');
   await page.getByRole('button', { name: '开始通话' }).click();
   await waitFor('#status', '正在聆听');
-  await page.getByRole('button', { name: '文字输入' }).click();
   await page.getByRole('textbox', { name: '文字消息' }).fill('测试浏览器直连');
   await page.getByRole('button', { name: '发送', exact: true }).click();
   await waitFor('.entry.assistant .content', '这是浏览器直连的回复');
@@ -183,7 +182,6 @@ try {
 
   await page.goto(second);
   await waitFor('#backend-label', 'Pipiclaw 已连接');
-  await page.getByRole('button', { name: '文字输入' }).click();
   await page.getByRole('textbox', { name: '文字消息' }).fill('测试同机中转');
   await page.getByRole('button', { name: '发送', exact: true }).click();
   await waitFor('.entry.assistant .content', answer.content[0].text);

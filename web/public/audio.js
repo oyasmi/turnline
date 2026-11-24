@@ -30,6 +30,7 @@ export async function captureMicrophone(context, onFrame, signal) {
     source.connect(worklet).connect(context.destination);
     signal.addEventListener('abort', stop, { once: true });
     return {
+      active: () => stream.getAudioTracks().some(track => track.readyState === 'live'),
       setEnabled(enabled) {
         for (const track of stream.getAudioTracks()) track.enabled = enabled;
       },

@@ -2,23 +2,27 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark light">
-  <meta name="theme-color" content="#111916">
+  <meta name="theme-color" content="#17131f">
   <title>Turnline · 语音通话</title>
+  <link id="favicon" rel="icon" href="/assets/icons/turnline.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icons/turnline-192.png">
+  <link rel="manifest" href="/assets/manifest.webmanifest">
   <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/tokens.css">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <a id="home" class="brand" href="/" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
+      <a id="home" class="brand" href="/" aria-label="Turnline 首页"><img class="brand-mark" src="/assets/icons/turnline.svg" alt="" width="34" height="34">Turnline</a>
       <div class="top-actions">
         <span id="backend-label" data-connection="checking" class="backend" role="status"><i aria-hidden="true"></i>正在连接</span>
         <button id="toggle-theme" type="button" class="button icon-button" aria-label="使用浅色主题" title="使用浅色主题">
-          <span class="theme-sun" aria-hidden="true">☀</span><span class="theme-moon" aria-hidden="true">☾</span>
+          <svg class="icon theme-sun" aria-hidden="true"><use href="/assets/icons.svg#sun"/></svg><svg class="icon theme-moon" aria-hidden="true"><use href="/assets/icons.svg#moon"/></svg>
         </button>
-        <button id="open-settings" type="button" class="button ghost">通话设置</button>
+        <button id="open-settings" type="button" class="button icon-button" aria-label="通话设置" title="通话设置" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#settings"/></svg></button>
       </div>
     </div>
   </header>
@@ -35,44 +39,72 @@
         <div class="call-top">
           <h1 id="call-title">语音通话</h1>
           <div class="call-meta">
+            <span id="signal" class="signal" hidden>
+              <svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19v-4m5 4v-7m5 7V9m5 10V5"/></svg>
+              <span class="sr-only"></span>
+            </span>
             <time id="duration">00:00</time>
             <button id="open-diagnostics" type="button" class="button icon-button" aria-label="通话诊断" title="通话诊断" aria-haspopup="dialog">
-              <span class="info-icon" aria-hidden="true">i</span>
+              <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#info"/></svg>
             </button>
           </div>
         </div>
         <div class="call-center">
           <button id="orb" type="button" class="orb" data-state="idle" aria-label="立即发送语音" disabled>
-            <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+            <canvas id="call-scope" aria-hidden="true"></canvas>
           </button>
-          <p id="status" class="status" role="status">准备通话</p>
-          <p id="hint" class="hint">开麦后，说完一句稍作停顿即可发送。</p>
-        </div>
-        <div class="call-actions">
-          <button id="call" type="button" class="button primary" disabled>开始通话</button>
-          <div class="secondary-actions">
-            <button id="mute" type="button" class="button outline" disabled>静音</button>
-            <button id="interrupt" type="button" class="button outline" disabled>打断</button>
+          <div class="stage-copy">
+            <p id="status" class="status" role="status" tabindex="-1">准备通话</p>
+            <p id="hint" class="hint">开麦后，说完一句稍作停顿即可发送。</p>
+            <div id="stage-caption" class="stage-caption" aria-hidden="true"></div>
+            <div id="stage-progress" class="stage-progress" hidden><span></span><small>即将发送</small></div>
+            <p id="announcement" class="sr-only" aria-live="polite"></p>
           </div>
         </div>
+        <p id="error" class="error call-error" role="alert" hidden></p>
+        <div class="call-actions">
+          <button id="mute" type="button" class="button round" aria-label="静音" title="静音" hidden disabled>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#mic"/></svg><span>静音</span>
+          </button>
+          <button id="call" type="button" class="button primary start-call" disabled>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#phone"/></svg><span>开始通话</span>
+          </button>
+          <button id="toggle-composer" type="button" class="button round" aria-label="文字输入" title="文字输入" aria-controls="composer" hidden>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#keyboard"/></svg><span>文字输入</span>
+          </button>
+          <button id="interrupt" type="button" class="button round interrupt" aria-label="打断" title="打断" hidden disabled>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#stop"/></svg><span>打断</span>
+          </button>
+        </div>
+        <p id="shortcut-hint" class="shortcut-hint" hidden><kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断</p>
       </section>
 
       <section class="transcript" aria-labelledby="transcript-title">
         <header class="panel-heading">
-          <h2 id="transcript-title">对话记录</h2>
+          <h2 id="transcript-title"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#transcript"/></svg>对话记录</h2>
           <div class="transcript-actions">
-            <button id="toggle-composer" type="button" class="button subtle" aria-controls="composer" aria-expanded="false">文字输入</button>
-            <button id="new-session" type="button" class="button subtle">新对话</button>
+            <button id="expand-transcript" type="button" aria-controls="messages" class="button icon-button" aria-label="展开对话记录" title="展开对话记录" aria-expanded="false">
+              <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#expand"/></svg>
+            </button>
+            <button id="new-session" type="button" class="button ghost"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#plus"/></svg>新对话</button>
           </div>
         </header>
-        <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="polite">
-          <p id="empty" class="empty">通话内容会显示在这里。</p>
+        <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="off" tabindex="0">
+          <div id="empty" class="empty">
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#transcript"/></svg>
+            <p>通话内容会显示在这里</p>
+            <p>语音由 Turnline 识别，Pipiclaw 接收文字。</p>
+          </div>
         </div>
-        <p id="error" class="error" role="alert" hidden></p>
-        <form id="composer" class="composer" hidden>
+        <form id="composer" class="composer">
           <label class="sr-only" for="message">文字消息</label>
-          <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息" disabled>
-          <button id="send-message" class="button send" type="submit" disabled>发送</button>
+          <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息…" disabled>
+          <button id="text-only" type="button" class="button icon-button" aria-label="只看文字回复" title="只看文字回复" aria-pressed="false">
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#speaker-off"/></svg>
+          </button>
+          <button id="send-message" class="button send" type="submit" disabled>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#send"/></svg><span>发送</span>
+          </button>
         </form>
       </section>
     </div>
@@ -89,6 +121,12 @@
         <span id="trace-count">暂无通话计时</span>
       </div>
       <dl class="metrics">
+        <div><dt>点击到可说话</dt><dd id="metric-ready">—</dd></div>
+        <div><dt>等待提示</dt><dd id="metric-feedback">—</dd></div>
+        <div><dt>请求到响应创建</dt><dd id="metric-created">—</dd></div>
+        <div><dt>请求到首个推理事件</dt><dd id="metric-reasoning">—</dd></div>
+        <div><dt>请求到首个消息条目</dt><dd id="metric-first-message">—</dd></div>
+        <div><dt>请求到首个工具调用</dt><dd id="metric-first-tool">—</dd></div>
         <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
         <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
         <div><dt>停说到可闻首声</dt><dd id="metric-perceived">—</dd></div>
@@ -109,10 +147,10 @@
     </div>
   </dialog>
 
-  <dialog id="settings">
+  <dialog id="settings" aria-labelledby="settings-title">
     <form id="settings-form">
       <header class="panel-heading">
-        <h2>通话设置</h2>
+        <h2 id="settings-title">通话设置</h2>
         <button id="close-settings" type="button" class="button subtle">关闭</button>
       </header>
       <div class="fields">
@@ -137,6 +175,13 @@
             <option value="1.15">1.15×</option>
           </select>
         </label>
+        <label>语音输入
+          <select id="input-mode">
+            <option value="auto">自动断句</option>
+            <option value="hold">按住说话</option>
+          </select>
+        </label>
+        <label class="checkbox" id="waiting-option"><input id="waiting-tone" type="checkbox" checked>等待较久时播放思考音</label>
         <label class="checkbox"><input id="tones" type="checkbox" checked>播放通话提示音</label>
         <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断</label>
         <label>补充通话指令
@@ -150,10 +195,10 @@
       </div>
     </form>
   </dialog>
-  <dialog id="direct-settings">
+  <dialog id="direct-settings" aria-labelledby="direct-title">
     <form id="direct-form">
       <header class="panel-heading">
-        <h2>浏览器直连 Pipiclaw</h2>
+        <h2 id="direct-title">浏览器直连 Pipiclaw</h2>
         <button id="close-direct" class="button subtle" type="button">关闭</button>
       </header>
       <div class="fields">
@@ -169,6 +214,29 @@
         <button id="forget-direct" class="button subtle" type="button" hidden>清除 Key</button>
         <button id="test-direct" class="button primary" type="submit">测试并连接</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="microphone-help" aria-labelledby="microphone-title">
+    <form method="dialog">
+      <h2 id="microphone-title">开启麦克风</h2>
+      <p class="dialog-copy">通话时，Turnline 将你的语音转成文字。Pipiclaw 接收这份文字来回复你。</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="button subtle">取消</button>
+        <button id="allow-microphone" type="submit" value="allow" class="button primary">继续通话</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="shortcuts" aria-labelledby="shortcuts-title">
+    <form method="dialog">
+      <h2 id="shortcuts-title">键盘快捷键</h2>
+      <dl class="shortcut-list">
+        <div><dt><kbd>Space</kbd></dt><dd>按住说话，松开发送</dd></div>
+        <div><dt><kbd>M</kbd></dt><dd>静音或取消静音</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>打断回复或关闭弹窗</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>聚焦文字输入</dd></div>
+        <div><dt><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd></dt><dd>发送文字</dd></div>
+      </dl>
+      <div class="dialog-actions"><button class="button ghost">关闭</button></div>
     </form>
   </dialog>
   <script type="module" src="/assets/app.js"></script>

@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "Turnline 语音通话",
+  "short_name": "Turnline",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#17131f",
+  "theme_color": "#17131f",
+  "icons": [
+    { "src": "/assets/icons/turnline-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/assets/icons/turnline-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/assets/icons/turnline-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

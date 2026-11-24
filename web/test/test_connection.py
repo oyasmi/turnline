@@ -153,10 +153,13 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                         async with client.stream(
                             "POST", PREFIX + "/responses", headers=headers,
                             json={"input": "你好", "conversation": CONVERSATION,
-                                  "model": "invalid", "tools": ["unused"], "instructions": "短答"},
+                                  "model": "invalid", "tools": ["unused"], "instructions": "短答",
+                                  "reasoning": {"effort": "low", "summary": "auto"},
+                                  "text": {"verbosity": "low", "format": {"type": "unused"}}},
                         ) as response:
                             async with asyncio.timeout(3):
                                 self.assertEqual(await anext(response.aiter_bytes()), b"data: {}\n\n")
                         await asyncio.wait_for(upstream_cancelled.wait(), 3)
                         self.assertEqual(requests, [{"model": "pipiclaw", "stream": True, "input": "你好",
-                                                     "conversation": CONVERSATION, "instructions": "短答"}])
+                                                     "conversation": CONVERSATION, "instructions": "短答",
+                                                     "reasoning": {"effort": "low"}, "text": {"verbosity": "low"}}])

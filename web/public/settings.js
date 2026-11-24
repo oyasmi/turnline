@@ -47,6 +47,8 @@ export function preferences() {
     speed: RESPONSE_SPEEDS.includes(saved?.speed) ? saved.speed : migratedSpeed ?? 'balanced',
     rate: SPEECH_RATES.includes(saved?.rate) ? saved.rate : 1.07,
     tones: saved?.tones !== false,
+    waitingTone: saved?.waitingTone !== false,
+    inputMode: saved?.inputMode === 'hold' ? 'hold' : 'auto',
     duplex: saved?.duplex === true,
     instructions: typeof saved?.instructions === 'string' ? saved.instructions.slice(0, 3000) : '',
   };

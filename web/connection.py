@@ -200,6 +200,14 @@ class Pipiclaw:
         if isinstance(instructions, str) and len(instructions) <= 8_000:
             body["instructions"] = instructions
 
+        for key, field, values in (
+            ("reasoning", "effort", ("none", "minimal", "low", "medium", "high", "xhigh")),
+            ("text", "verbosity", ("low", "medium", "high")),
+        ):
+            options = candidate.get(key)
+            if isinstance(options, dict) and options.get(field) in values:
+                body[key] = {field: options[field]}
+
         @asynccontextmanager
         async def prepare():
             try:

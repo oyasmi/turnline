@@ -1,25 +1,14 @@
 import { clock } from './audio.js';
 
-function resample(input, from, to) {
-  if (from === to) return input;
-  const ratio = from / to;
-  const output = new Float32Array(Math.max(1, Math.round(input.length / ratio)));
-  for (let index = 0; index < output.length; index++) {
-    const position = index * ratio;
-    const left = Math.floor(position);
-    const sample = input[Math.min(left, input.length - 1)];
-    output[index] = sample + ((input[left + 1] ?? sample) - sample) * (position - left);
-  }
-  return output;
-}
+import { resample } from './resampler.js';
 
 function earcon(rate, kind) {
-  const notes = { connect: [520, 680], commit: [570], disconnect: [540, 390] }[kind];
-  const audio = new Float32Array(Math.round(rate * (notes.length === 1 ? 0.080 : 0.14)));
+  const notes = { connect: [520, 680], commit: [570], disconnect: [540, 390], waiting: [385] }[kind];
+  const audio = new Float32Array(Math.round(rate * (kind === 'waiting' ? 0.24 : notes.length === 1 ? 0.080 : 0.14)));
   for (let i = 0; i < audio.length; i++) {
     const progress = i / audio.length;
     const window = Math.sin(Math.PI * progress) ** 2;
-    audio[i] = 0.052 * window * Math.sin(2 * Math.PI * notes[Math.floor(progress * notes.length)] * i / rate);
+    audio[i] = (kind === 'waiting' ? 0.027 : 0.052) * window * Math.sin(2 * Math.PI * notes[Math.floor(progress * notes.length)] * i / rate);
   }
   return audio;
 }
@@ -38,7 +27,7 @@ export class SpeechPlayer {
     this.node = new AudioWorkletNode(context, 'speech-output', { numberOfInputs: 0, outputChannelCount: [1] });
     this.node.port.onmessage = ({ data }) => this.receive(data);
     this.node.connect(context.destination);
-    this.tones = new Map(['connect', 'commit', 'disconnect'].map(kind => [kind, earcon(context.sampleRate, kind)]));
+    this.tones = new Map(['connect', 'commit', 'disconnect', 'waiting'].map(kind => [kind, earcon(context.sampleRate, kind)]));
   }
 
   begin() {
@@ -136,7 +125,7 @@ export class SpeechPlayer {
       } else if (group) {
         group.head = undefined;
       }
-      this.onEvent({ type: 'playback-level', rms: message.rms });
+      this.onEvent({ type: 'playback-level', rms: message.rms, position: this.heardPosition });
       return;
     }
     if (message.type === 'gain') {
@@ -175,18 +164,20 @@ export class SpeechPlayer {
     return this.group?.recent.slice() ?? [];
   }
 
-  get heardFragment() {
+  get heardPosition() {
     const group = this.group;
     const head = group?.head;
     const entry = group?.entries.get(head?.seq);
-    if (!entry) return '';
+    if (!entry) return undefined;
     const ahead = Math.max(0, this.outputTime(head.frame) - clock());
     const offset = head.offset - Math.round(ahead * this.context.sampleRate / 1000);
-    if (offset <= entry.start) return '';
-    const ratio = Math.min(1, (offset - entry.start) / (entry.end - entry.start));
+    const ratio = Math.max(0, Math.min(1, (offset - entry.start) / (entry.end - entry.start)));
     const text = Array.from(entry.text);
-    return text.slice(0, Math.max(1, Math.round(text.length * ratio))).join('');
+    const heard = text.slice(0, Math.round(text.length * ratio)).join('');
+    return { entry, heard };
   }
+
+  get heardFragment() { return this.heardPosition?.heard ?? ''; }
 
   gain(value, ms, freeze = false, event) {
     this.node?.port.postMessage({ type: 'gain', value, ms, freeze, event });
@@ -194,8 +185,10 @@ export class SpeechPlayer {
 
   tone(kind) {
     const audio = this.tones?.get(kind);
-    if (audio) this.node?.port.postMessage({ type: 'tone', audio });
+    if (audio) this.node?.port.postMessage({ type: 'tone', kind, audio });
   }
+
+  stopTone(kind) { this.node?.port.postMessage({ type: 'stop-tone', kind }); }
 
   stop() {
     if (!this.group) return;

@@ -139,3 +139,15 @@ test('speaks the result of a task report and keeps its internal identifier on sc
   assert.equal(updateSpeech('**任务 `check-1` 汇报**\n检查完成。详细结果已记录。'), '检查完成。');
   assert.equal(updateSpeech('**✅ 任务 `check-1` 已完成**\n- 历时：两秒'), '任务 已完成');
 });
+
+test('speech offsets refer to the original Markdown around omitted material', () => {
+  const source = '**空间**还有 40 GB。请看[帮助](https://example.com)。\n```sh\nfree -h\n```';
+  const result = splitSpeech(source, true, false, true);
+  assert.equal(result.phrases.length, 2);
+  const [first, second] = result.ranges;
+  assert.equal(source.slice(first.start, first.end), '**空间**还有 40 GB。');
+  const linkLabel = source.indexOf('帮助');
+  assert.ok(second.offsets.includes(linkLabel));
+  assert.ok(!second.offsets.includes(source.indexOf('https:')));
+  assert.ok(!second.offsets.includes(source.indexOf('free')));
+});
