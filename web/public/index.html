@@ -42,9 +42,9 @@
           </div>
         </div>
         <div class="call-center">
-          <div id="orb" class="orb" data-state="idle" aria-hidden="true">
-            <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-          </div>
+          <button id="orb" type="button" class="orb" data-state="idle" aria-label="立即发送语音" disabled>
+            <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          </button>
           <p id="status" class="status" role="status">准备通话</p>
           <p id="hint" class="hint">开麦后，说完一句稍作停顿即可发送。</p>
         </div>
@@ -91,9 +91,12 @@
       <dl class="metrics">
         <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
         <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
-        <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
-        <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
-        <div><dt>断句到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
+        <div><dt>停说到可闻首声</dt><dd id="metric-perceived">—</dd></div>
+        <div><dt>停说到提交</dt><dd id="metric-silence-wait">—</dd></div>
+        <div><dt>首条实时字幕</dt><dd id="metric-partial-lag">—</dd></div>
+        <div><dt>提交到首声</dt><dd id="metric-audio">—</dd></div>
+        <div><dt>开口到暂停</dt><dd id="metric-interruption">—</dd></div>
+        <div><dt>提交到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
         <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
         <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
         <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
@@ -113,20 +116,28 @@
         <button id="close-settings" type="button" class="button subtle">关闭</button>
       </header>
       <div class="fields">
-        <label>断句停顿
-          <select id="silence">
-            <option value="1">紧凑 · 1 秒</option>
-            <option value="1.5">快速 · 1.5 秒</option>
-            <option value="2.2" selected>自然 · 2.2 秒</option>
-            <option value="3">从容 · 3 秒</option>
+        <label>反应速度
+          <select id="speed">
+            <option value="quick">灵敏</option>
+            <option value="balanced" selected>均衡</option>
+            <option value="patient">耐心</option>
           </select>
         </label>
         <label>播报时机
           <select id="reading">
-            <option value="live" selected>流式播报 · 超过 20 字开播</option>
+            <option value="live" selected>流式播报</option>
             <option value="confirmed">确认正文后播报</option>
           </select>
         </label>
+        <label>播报语速
+          <select id="rate">
+            <option value="0.9">0.9×</option>
+            <option value="1">1.0×</option>
+            <option value="1.07" selected>1.07×</option>
+            <option value="1.15">1.15×</option>
+          </select>
+        </label>
+        <label class="checkbox"><input id="tones" type="checkbox" checked>播放通话提示音</label>
         <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断</label>
         <label>补充通话指令
           <textarea id="instructions" rows="2" maxlength="3000" placeholder="例如，每次只说一个步骤"></textarea>

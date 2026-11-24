@@ -17,6 +17,25 @@ FULLWIDTH_CODE = re.compile(r"[Ａ-Ｚａ-ｚ０-９]+")
 LEADING_PUNCTUATION = re.compile(r"^[\s,.!?;:]+")
 
 
+def speech_text(text):
+    """Clean streamed and HTTP text using the same pronunciation rules."""
+    chinese = bool(CHINESE_RUN.search(text)) or not re.search(r"[A-Za-z]", text)
+    units = dict(zip(
+        ("TB", "GB", "MB", "KB"),
+        ("太字节", "吉字节", "兆字节", "千字节") if chinese else
+        (" terabytes", " gigabytes", " megabytes", " kilobytes"),
+    ))
+    text = re.sub(r"```[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\)|https?://[^\s，。！？]+", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^[ \t]*(?:#+|>|[-*+]\s|\d+\.\s)", "", text, flags=re.M)
+    text = re.sub(r"([+-]?\d+(?:\.\d+)?)\s*[%％]", r"百分之\1" if chinese else r"\1 percent", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB)\b",
+                  lambda match: match[1] + units[match[2].upper()], text, flags=re.I)
+    text = re.sub(r"~/\.([a-z][a-z\d-]*)(?![\w/-])",
+                  r"家目录的点 \1" if chinese else r"home directory dot \1", text, flags=re.I)
+    return re.sub(r"[`*#~_《》]", "", text).strip()
+
+
 def expand_model_code(match):
     token = match[0]
     parts = CODE_PART.findall(token)

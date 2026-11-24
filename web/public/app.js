@@ -1,9 +1,17 @@
-import { captureMicrophone, clock, RecognizerConnection, speechServer, SpeechPlayer } from './audio.js';
+import { clock } from './audio.js';
+import { openCallAudio, closeCallAudio } from './call-audio.js';
+import { VoiceSession } from './voice-session.js';
+import { SpeechPlayer } from './player.js';
+import { BargeIn, matchesEcho } from './barge-in.js';
+import { callPhase, captureMode, initialCallState, reduceCall } from './call-state.js';
+import { renderCall, showLevel, showThinking } from './call-view.js';
 import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
 import { checkDirectConnection, createConversation, isBackchannel, listConversationItems, normalizeDirectUrl,
-  openResponse, splitSpeech } from './responses.js';
+  openResponse } from './responses.js';
+import { splitSpeech } from './chunker.js';
+import { directSettings, preferences, saveDirectSettings, savePreferences, store, stored } from './settings.js';
+import { Transcript } from './transcript.js';
 import { CallTrace } from './call-trace.js';
-import { VoiceTurn } from './voice-turn.js';
 
 const $ = id => document.getElementById(id);
 const metrics = {
@@ -11,6 +19,9 @@ const metrics = {
   text: $('metric-text'),
   endpointToRequest: $('metric-endpoint-request'),
   audio: $('metric-audio'),
+  perceived: $('metric-perceived'),
+  silenceWait: $('metric-silence-wait'),
+  partialLag: $('metric-partial-lag'),
   interruption: $('metric-interruption'),
   backendQueue: $('metric-backend-queue'),
   textWait: $('metric-text-wait'),
@@ -20,70 +31,17 @@ const metrics = {
   pcm: $('metric-pcm'),
   gaps: $('metric-gaps'),
 };
-const messages = $('messages');
+const transcript = new Transcript($('messages'), $('empty'));
 const field = $('message');
 const dialog = $('settings');
 const diagnostics = $('diagnostics');
-const PREFERENCES = 'turnline.preferences.v2';
-const PREVIOUS_PREFERENCES = 'turnline.preferences.v1';
-const DEFAULT_SILENCE = 2.2;
-const SILENCE_OPTIONS = [1, 1.5, DEFAULT_SILENCE, 3];
-const PREVIOUS_SILENCE = { 0.35: 1, 0.5: 1.5, 0.8: DEFAULT_SILENCE, 1.2: 3 };
 const ACTIVE_CONVERSATION = 'turnline.active-conversation.v1';
-const DIRECT_ADDRESS = 'turnline.direct-address.v1';
-const DIRECT_CREDENTIALS = 'turnline.direct-credentials.v1';
 const directMode = location.pathname === '/direct';
 const directDialog = $('direct-settings');
 const relay = { mode: 'relay', url: '/api/pipiclaw/v1', model: 'pipiclaw', context: 'conversation' };
 
-function stored(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-
-function store(key, value) {
-  try {
-    if (value === undefined) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
-  } catch {}
-}
-
-function directSettings() {
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(DIRECT_CREDENTIALS));
-    const url = normalizeDirectUrl(saved?.url || stored(DIRECT_ADDRESS) || '', location.origin);
-    return { mode: 'direct', url, key: saved?.url === url ? saved.key : '' };
-  } catch {
-    return { mode: 'direct', url: '', key: '' };
-  }
-}
-
-function saveDirectSettings(url, key) {
-  store(DIRECT_ADDRESS, url);
-  try {
-    if (key) sessionStorage.setItem(DIRECT_CREDENTIALS, JSON.stringify({ url, key }));
-    else sessionStorage.removeItem(DIRECT_CREDENTIALS);
-  } catch {}
-}
-
-function preferences() {
-  try {
-    const current = JSON.parse(stored(PREFERENCES));
-    const saved = current ?? JSON.parse(stored(PREVIOUS_PREFERENCES));
-    const silence = saved?.silence;
-    return {
-      reading: current?.reading === 'confirmed' ? 'confirmed' : 'live',
-      silence: SILENCE_OPTIONS.includes(silence) ? silence
-        : (typeof silence === 'number' ? PREVIOUS_SILENCE[silence] : undefined) ?? DEFAULT_SILENCE,
-      duplex: saved?.duplex === true,
-      instructions: typeof saved?.instructions === 'string' ? saved.instructions.slice(0, 3000) : '',
-    };
-  } catch {
-    return { reading: 'live', silence: DEFAULT_SILENCE, duplex: false, instructions: '' };
-  }
-}
-
 let settings = {
-  ...preferences(), ...relay, ...(directMode ? directSettings() : {}), voice: 0,
+  ...preferences(), ...relay, ...(directMode ? directSettings() : {}),
 };
 let connection = 'checking';
 let connectionDetail;
@@ -95,28 +53,33 @@ let updates;
 let pendingUpdates = [];
 let call;
 let turn;
-let barge;
-let muted = false;
-let micEpoch = 0;
-let micBlocked = true;
-let recognizing = false;
-let speakingUser = false;
-let asrReady = false;
-let ttsReady = false;
+let state = initialCallState;
+let readyModels = false;
 let interruption = '';
 let history = [];
+let voiceQueue = [];
+let previousCommit;
+let previousOutput;
+let inputTelemetry;
+let expectingAnswer = false;
 
-const endpoints = new Map();
-const voiceTurn = new VoiceTurn((text, timing) => void send(text, timing), render);
 const trace = new CallTrace({ getItem: stored, setItem: store }, count => {
   $('export-timing').disabled = !count;
   $('trace-count').textContent = count ? '已记录 ' + count + ' 轮' : '暂无通话计时';
 });
-const asr = new RecognizerConnection(onRecognition);
-const player = new SpeechPlayer(speechServer, () => {
-  updateListening();
-  render();
-}, error => showError(error.message));
+const voice = new VoiceSession(onVoice);
+const player = new SpeechPlayer(voice, onPlayback);
+const barge = new BargeIn(player, onBarge);
+
+function dispatch(event) {
+  const [next, effects] = reduceCall(state, event);
+  state = next;
+  for (const effect of effects) {
+    if (effect === 'capture') voice.capture(captureMode(state, settings.duplex), event.tailAt);
+    if (effect === 'drain') queueMicrotask(drainWaiting);
+  }
+  if (effects.length) render();
+}
 
 function showError(message, location = $('error')) {
   location.textContent = message ?? '';
@@ -128,8 +91,7 @@ function showMetric(name, value) {
 }
 
 function renderModelStatus() {
-  const ready = [asrReady && 'SenseVoice', ttsReady && 'Matcha'].filter(Boolean);
-  $('models').textContent = ready.length ? ready.join(' · ') + ' 已就绪' : 'SenseVoice · Matcha';
+  $('models').textContent = readyModels ? 'SenseVoice · Matcha 已就绪' : 'SenseVoice · Matcha';
 }
 
 function setMetric(current, name, value) {
@@ -177,7 +139,7 @@ async function restoreConversation(generation) {
       if (item.type !== 'message' || item.status !== 'completed') continue;
       const text = item.content.map(part => part.text).filter(Boolean).join('\n');
       if (text && (item.role === 'user' || item.phase === 'final_answer')) {
-        addMessage(item.role === 'user' ? 'user' : 'assistant', text);
+        transcript.add(item.role === 'user' ? 'user' : 'assistant', text);
       }
     }
     watchConversation(id, page.data[0]?.id);
@@ -253,45 +215,10 @@ function ensureConversation() {
 }
 
 function render() {
-  const preparing = call && !call.ready;
-  const busy = Boolean(turn && !turn.ended) || player.active;
-  let state = 'idle';
-  let label = '准备通话';
-  let hint = '开麦后，说完一句稍作停顿即可发送。';
-  if (preparing) {
-    state = 'preparing';
-    label = '正在准备';
-    hint = '语音服务正在加载模型，请允许麦克风访问。';
-  } else if (player.playing) {
-    state = 'speaking';
-    label = '正在播报';
-    hint = settings.duplex && !muted ? '你可以直接开口插话。' : '点一下「打断」即可继续说。';
-  } else if (speakingUser || recognizing || voiceTurn.waiting) {
-    state = 'recognizing';
-    label = recognizing ? '正在识别' : voiceTurn.waiting && !speakingUser ? '等你继续说' : '正在听你说';
-    hint = '语音由 Turnline 服务处理。';
-  } else if (busy) {
-    state = 'thinking';
-    label = player.active ? '正在合成' : '等待回复';
-    hint = '收到正文后会显示在对话记录里。';
-  } else if (call) {
-    state = muted ? 'idle' : 'listening';
-    label = muted ? '麦克风已静音' : '正在聆听';
-    hint = muted ? '你仍可以输入文字消息。' : '说完稍作停顿即可发送。';
-  }
-  $('orb').dataset.state = state;
-  $('status').textContent = label;
-  $('hint').textContent = hint;
-  $('call').textContent = call ? '挂断' : '开始通话';
-  $('call').classList.toggle('hang-up', Boolean(call));
-  $('call').disabled = !call && !canCall();
-  field.disabled = !canCall();
-  $('send-message').disabled = !canCall();
-  $('mute').textContent = muted ? '取消静音' : '静音';
-  $('mute').setAttribute('aria-pressed', String(muted));
-  $('mute').disabled = !call?.ready;
-  $('interrupt').disabled = !busy;
-  if (pendingUpdates.length) queueMicrotask(speakNextUpdate);
+  renderCall(state, {
+    canCall: canCall(), duplex: settings.duplex, pendingPlayback: player.active,
+    busy: Boolean(turn && !turn.ended) || player.active || player.playing,
+  });
 }
 
 function updateDuration() {
@@ -299,49 +226,52 @@ function updateDuration() {
   $('duration').textContent = [Math.floor(seconds / 60), seconds % 60].map(n => String(n).padStart(2, '0')).join(':');
 }
 
-function updateListening(force = false) {
-  const blocked = !call?.ready || !asrReady || muted || (!settings.duplex && player.playing);
-  if (!force && blocked === micBlocked) return;
-  micBlocked = blocked;
-  recognizing = false;
-  speakingUser = false;
-  releaseBarge();
-  voiceTurn.reset();
-  micEpoch++;
-  endpoints.clear();
-  if (call?.ready) asr.reset(micEpoch, settings.silence);
+function clearInput() {
+  barge.clear();
+  player.gain(1, 35);
+  transcript.clearDraft();
+  inputTelemetry = undefined;
+  voice.reset();
+  dispatch({ type: 'reset-input' });
 }
 
 async function startCall() {
   if (!canCall()) return;
   showError();
-  const started = { started: clock(), controller: new AbortController() };
-  call = started;
-  trace.start(started.started);
-  muted = false;
-  render();
-  updateDuration();
-  const playback = player.resume();
-  const recognition = asr.connect().then(() => { asrReady = true; renderModelStatus(); });
-  const synthesis = speechServer.prepare(started.controller.signal).then(() => {
-    if (call !== started) return;
-    ttsReady = true;
-    renderModelStatus();
-  });
-  const microphone = captureMicrophone(samples => {
-    if (call === started && !micBlocked) asr.frame(samples);
-  }).then(microphone => {
-    if (call !== started) microphone.stop();
-    else started.microphone = microphone;
-  });
+  let context;
   try {
-    await Promise.all([playback, recognition, synthesis, microphone]);
-    if (call !== started) return;
-    started.ready = true;
-    updateListening(true);
-    render();
+    context = new AudioContext({ latencyHint: 'interactive' });
+  } catch {
+    showError('当前浏览器无法打开语音通话。');
+    return;
+  }
+  const controller = new AbortController();
+  const { signal } = controller;
+  const started = { started: clock(), controller, context };
+  call = started;
+  readyModels = false;
+  previousCommit = previousOutput = undefined;
+  trace.start(started.started);
+  dispatch({ type: 'connect' });
+  renderModelStatus();
+  updateDuration();
+  if (settings.context === 'conversation') void ensureConversation().catch(() => {});
+  try {
+    await openCallAudio(started, voice, player, {
+      speed: settings.speed,
+      expectingAnswer,
+      onFrame: onCapture,
+      muted: () => state.muted,
+      switched: clearInput,
+      showError,
+    });
+    if (signal.aborted) return;
+    readyModels = started.ready = true;
+    dispatch({ type: 'ready' });
+    renderModelStatus();
+    if (settings.tones) player.tone('connect');
   } catch (error) {
-    if (call !== started) return;
+    if (signal.aborted) return;
     hangUp();
     showError(error.name === 'NotAllowedError' ? '麦克风权限未开启。请在浏览器允许访问后重试。' : error.message);
   }
@@ -350,44 +280,28 @@ async function startCall() {
 function hangUp() {
   const ended = call;
   call = undefined;
+  voiceQueue = [];
   pendingUpdates = [];
+  dispatch({ type: 'hangup' });
   ended?.controller.abort();
-  ended?.microphone?.stop();
-  asr.close();
-  muted = false;
+  transcript.clearDraft();
+  voice.close();
   interrupt(false, 'hangup');
-  if (ended) trace.stop(clock());
-  updateListening(true);
+  if (ended) {
+    trace.stop(clock());
+    closeCallAudio(ended, player, settings.tones);
+  }
   updateDuration();
   render();
 }
 
-function addMessage(role, text = '') {
-  const follow = role === 'user' || followingMessages();
-  $('empty').hidden = true;
-  const row = document.createElement('article');
-  const who = document.createElement('span');
-  const content = document.createElement('p');
-  const flag = document.createElement('span');
-  row.className = 'entry ' + role;
-  who.className = 'who';
-  who.textContent = role === 'user' ? '你' : role === 'update' ? '会话更新' : '助手';
-  content.className = 'content';
-  content.textContent = text;
-  flag.className = 'flag';
-  flag.textContent = '已打断';
-  row.append(who, content, flag);
-  messages.append(row);
-  if (follow) scrollMessages();
-  return { row, who, content };
-}
-
-function scrollMessages() {
-  messages.scrollTop = messages.scrollHeight;
-}
-
-function followingMessages() {
-  return messages.scrollHeight - messages.clientHeight - messages.scrollTop < 40;
+function onCapture({ samples, rms, fastStart }, at) {
+  if (state.muted) return;
+  if (settings.duplex && player.playing && !state.barge && state.input === 'quiet' && fastStart) {
+    barge.duck(at - 64, player.echoReferences);
+  }
+  if (!player.playing || state.input !== 'quiet' && !state.barge) showLevel(rms);
+  voice.frame(samples, at, rms >= 0.012);
 }
 
 function rememberAnswer(current, content) {
@@ -402,37 +316,42 @@ function rememberAnswer(current, content) {
 }
 
 function showConversationUpdate(text, speak) {
-  addMessage('update', text);
+  transcript.add('update', text);
   if (!speak || !call?.ready) return;
   const summary = updateSpeech(text);
   if (summary) {
     pendingUpdates.push(summary);
     if (pendingUpdates.length > 5) pendingUpdates.shift();
-    speakNextUpdate();
+    drainWaiting();
   }
 }
 
-function speakNextUpdate() {
-  if (!call?.ready || speakingUser || recognizing || player.active || (turn && !turn.ended)) return;
+function drainWaiting() {
+  if (!canCall() || state.input !== 'quiet' || state.output !== 'idle' || turn && !turn.ended) return;
+  if (['connecting', 'reconnecting'].includes(state.connection)) return;
+  const queued = voiceQueue.shift();
+  if (queued) {
+    void send(queued.text, queued, queued.display);
+    return;
+  }
+  if (!call?.ready || state.muted) return;
   const text = pendingUpdates.shift();
   if (text) {
     turn = undefined;
-    player.enqueue({ text, voice: settings.voice });
+    dispatch({ type: 'request-started' });
+    const group = player.begin();
+    player.enqueue(group, { text, speed: settings.rate });
+    player.seal(group);
+    render();
   }
 }
 
-function releaseBarge() {
-  if (!barge) return;
-  barge = undefined;
-  player.unpause();
-}
-
 function interrupt(note = true, reason = 'interrupted') {
-  voiceTurn.reset();
   const previous = turn;
+  const fragment = player.heardFragment;
   const completedBeforeInterrupt = previous?.ended;
   const hadOutput = Boolean(previous && (!previous.ended || player.active));
-  barge = undefined;
+  barge.clear();
   if (previous) {
     if (!previous.ended) {
       updates?.interrupted();
@@ -444,71 +363,187 @@ function interrupt(note = true, reason = 'interrupted') {
   }
   turn = undefined;
   player.stop();
+  showThinking(false);
+  dispatch({ type: 'playback-ended', waiting: false });
   if (hadOutput) {
     for (const entry of previous.items.values()) {
       if (entry.display && entry.phase !== 'commentary') entry.display.row.dataset.interrupted = 'true';
     }
     if (previous.traceItem && completedBeforeInterrupt) previous.traceItem.playback_interrupted = true;
     if (previous.voice && note) {
-      rememberAnswer(previous, previous.heard.join('\n'));
-      const last = previous.heard.at(-1);
-      interruption = last
-        ? '上一轮语音回复被打断。最后完整播完的一句是「' + last + '」。后面的内容尚未完整播出。'
-        : '上一轮语音回复被打断时，还没有完整播完一句。';
+      const heard = [...previous.heard];
+      if (fragment && fragment !== heard.at(-1)) heard.push(fragment);
+      rememberAnswer(previous, heard.join('\n'));
+      interruption = fragment
+        ? '上一轮语音回复在播到「' + fragment + '」附近时被打断。'
+        : heard.length
+          ? '上一轮语音回复被打断。最后完整播完的一句是「' + heard.at(-1) + '」。'
+          : '上一轮语音回复被打断时，还没有完整播完一句。';
     }
   }
   render();
 }
 
-function onRecognition(event) {
+function metricCount(item, name) {
+  if (!item) return;
+  item[name] = (item[name] ?? 0) + 1;
+  trace.save();
+}
+
+function onBarge(event) {
+  switch (event.type) {
+    case 'barge-confirmed': {
+      const preceding = turn?.traceItem;
+      trace.metric(preceding, 'bargeStop', clock() - event.at);
+      inputTelemetry.stopAt = event.at;
+      interrupt();
+      // The in-progress interruption is now an ordinary user utterance.
+      dispatch({ type: 'speech-start', input: state.inputId, duringPlayback: false });
+      break;
+    }
+    case 'restore':
+      if (event.input !== undefined) voice.send({ type: 'discard-input', input: event.input });
+      metricCount(turn?.traceItem, 'false_barge');
+      inputTelemetry = undefined;
+      transcript.clearDraft();
+      dispatch({ ...event, playing: player.playing });
+      break;
+    default:
+      dispatch(event);
+  }
+}
+
+function onPlayback(event) {
+  switch (event.type) {
+    case 'playback-started':
+      if (state.input !== 'quiet' && !state.barge) player.gain(0, 0, true);
+      dispatch(event);
+      break;
+    case 'playback-ended':
+    case 'playback-silent':
+      if (event.type === 'playback-silent') player.gain(1, 35);
+      if (event.references?.length) {
+        previousOutput = { references: event.references, at: event.tailAt ?? clock() };
+      }
+      barge.clear();
+      dispatch({ ...event, type: 'playback-ended', waiting: Boolean(turn && !turn.ended || player.active) });
+      break;
+    case 'playback-level':
+      if (player.playing && (state.input === 'quiet' || state.barge)) showLevel(event.rms);
+      break;
+    case 'playback-gain': {
+      const candidate = barge.candidate;
+      if (!candidate || !['duck', 'pause'].includes(event.event)) break;
+      const name = event.event === 'duck' ? 'bargeDuck' : 'bargePause';
+      const item = turn?.traceItem;
+      // Per-turn latency measures the first time playback yielded. Later
+      // recovery attempts have their own counter.
+      if (item?.timing_ms[name] !== undefined) break;
+      const latency = event.at - candidate.at;
+      trace.metric(item, name, latency);
+      if (event.event === 'pause') {
+        showMetric('interruption', latency);
+        trace.metric(item, 'interruption', latency);
+      }
+      break;
+    }
+    case 'playback-gap':
+      if (turn) {
+        turn.gaps += event.ms;
+        setMetric(turn, 'gaps', turn.gaps);
+        metricCount(turn.traceItem, 'underrun');
+      }
+      break;
+    case 'playback-error':
+      showError(event.message);
+      break;
+  }
+}
+
+function onVoice(event) {
+  if (!call) return;
   if (event.type === 'fatal') {
-    asrReady = false;
+    readyModels = false;
     renderModelStatus();
-    if (call) {
-      hangUp();
-      showError(event.message);
-    }
+    hangUp();
+    showError(event.message);
     return;
   }
-  if (event.type === 'error') {
-    if (call && !micBlocked) {
-      releaseBarge();
-      showError(event.message);
-    }
+  if (['reconnecting', 'input-gap', 'input-error'].includes(event.type)) {
+    if (event.input !== undefined && event.input !== state.inputId) return;
+    barge.clear();
+    player.gain(1, 70);
+    transcript.clearDraft();
+    inputTelemetry = undefined;
+    dispatch(event);
+    if (event.type === 'input-error' || event.voiced) showError(event.message ?? '网络较慢，刚才的语音可能不完整，请再说一遍。');
     return;
   }
-  if (!call || micBlocked || event.epoch !== micEpoch) return;
+  if (event.type === 'reconnected' || event.type === 'congestion') {
+    dispatch(event);
+    return;
+  }
+  if (state.muted || event.epoch !== voice.epoch) return;
+  const at = clock();
   if (event.type === 'speech-start') {
-    speakingUser = true;
-    voiceTurn.started();
-    if (!barge && (player.active || (turn && !turn.ended))) {
-      const candidate = { started: clock() };
-      barge = candidate;
-      void player.pause().then(() => {
-        if (barge === candidate) {
-          const elapsed = clock() - candidate.started;
-          showMetric('interruption', elapsed);
-          trace.metric(turn?.traceItem, 'interruption', elapsed);
-        }
-      }).catch(error => showError(error.message));
-    }
-  } else if (event.type === 'speech-end') {
-    speakingUser = false;
-    recognizing = true;
-    endpoints.set(event.segment, clock());
-  } else if (event.type === 'transcript') {
-    const endpointAt = endpoints.get(event.segment);
-    endpoints.delete(event.segment);
-    recognizing = endpoints.size > 0;
-    const text = event.text.trim();
-    if (text && !isBackchannel(text)) {
-      voiceTurn.accept(text, { endpointAt: endpointAt ?? clock(), asrMs: event.asrMs });
-    } else {
-      voiceTurn.finish();
-      releaseBarge();
-    }
+    const onset = voice.captureTime(event.startSample) ?? at;
+    const recentOutput = previousOutput && Math.abs(onset - previousOutput.at) <= 450;
+    const echoRisk = event.duringPlayback || event.overlap || recentOutput;
+    const references = event.duringPlayback ? player.echoReferences : previousOutput?.references;
+    inputTelemetry = { onset, references, echoRisk };
+    dispatch(event);
+    if (event.duringPlayback && settings.duplex && player.playing) barge.pause(event, onset);
+    return;
   }
-  render();
+  if (!inputTelemetry || event.input !== state.inputId) return;
+  if (event.type === 'resumed') {
+    transcript.resumeDraft();
+    dispatch(event);
+    return;
+  }
+  const text = event.text?.trim();
+  if (event.type === 'partial' && text) inputTelemetry.partialLag ??= at - inputTelemetry.onset;
+  if (state.barge) {
+    barge.transcript(event);
+    if (state.barge && event.type !== 'commit') return;
+    if (!inputTelemetry) return;
+  }
+  if (event.type === 'partial') {
+    transcript.showDraft(text);
+  } else if (event.type === 'tentative') {
+    dispatch(event);
+    const voiceEnd = voice.captureTime(event.voiceEndSample);
+    transcript.showDraft(text, event.waitMs - (voiceEnd === undefined ? 0 : at - voiceEnd));
+  } else if (event.type === 'commit') {
+    const telemetry = inputTelemetry;
+    inputTelemetry = undefined;
+    dispatch(event);
+    player.gain(1, 35);
+    const echo = telemetry.echoRisk && !telemetry.stopAt && (
+      matchesEcho(text, telemetry.references) || matchesEcho(text, player.echoReferences) ||
+      matchesEcho(text, previousOutput?.references)
+    );
+    if (!text || isBackchannel(text) || echo) {
+      transcript.clearDraft();
+      return;
+    }
+    if (previousCommit && telemetry.onset - previousCommit.endpointAt < 1500 && !telemetry.stopAt) {
+      previousCommit.cut = true;
+      if (previousCommit.traceItem) {
+        previousCommit.traceItem.cut = true;
+        trace.save();
+      }
+    }
+    const timing = {
+      text, endpointAt: at, voiceEndAt: voice.captureTime(event.voiceEndSample) ?? at - event.silenceWaitMs,
+      silenceWaitMs: event.silenceWaitMs, asrMs: event.asrMs, partialLag: telemetry.partialLag,
+      display: transcript.finalizeDraft(text),
+    };
+    previousCommit = timing;
+    if (settings.tones) player.tone('commit');
+    voiceQueue.push(timing);
+    drainWaiting();
+  }
 }
 
 function enqueue(current, phrase, firstTextAt) {
@@ -518,26 +553,24 @@ function enqueue(current, phrase, firstTextAt) {
     setMetric(current, 'speakable', current.firstSpeakable - current.sentAt);
     if (firstTextAt !== undefined) setMetric(current, 'textWait', current.firstSpeakable - firstTextAt);
   }
-  player.enqueue({
+  player.enqueue(current.playback, {
     text: phrase,
-    voice: current.settings.voice,
+    speed: current.settings.rate,
     onPcm(at, timing) {
       if (current.firstPcm) return;
       current.firstPcm = at;
       setMetric(current, 'pcm', at - current.firstSpeakable);
-      setMetric(current, 'queue', timing['tts-queue']);
-      setMetric(current, 'synthesis', timing['tts-first-pcm']);
+      setMetric(current, 'queue', timing.queue);
+      setMetric(current, 'synthesis', timing.synthesis);
     },
     onStart(at) {
       if (current.firstAudio) return;
       current.firstAudio = at;
       if (!current.gaps) setMetric(current, 'gaps', 0);
-      $('metric-audio').previousElementSibling.textContent = current.timing ? '断句到首声' : '发送到首声';
+      $('metric-audio').previousElementSibling.textContent = current.timing ? '提交到首声' : '发送到首声';
       setMetric(current, 'audio', at - (current.timing?.endpointAt ?? current.sentAt));
-    },
-    onGap(gap) {
-      current.gaps += gap;
-      setMetric(current, 'gaps', current.gaps);
+      if (current.timing) setMetric(current, 'perceived', at - current.timing.voiceEndAt);
+      showThinking(false);
     },
     onEnd() { current.heard.push(phrase); },
   });
@@ -559,13 +592,13 @@ function updateText(current, entry) {
     current.firstText = entry.firstTextAt;
     setMetric(current, 'text', current.firstText - current.sentAt);
   }
-  entry.display ??= addMessage('assistant');
-  const follow = followingMessages();
+  entry.display ??= transcript.add('assistant');
+  const follow = transcript.following();
   const commentary = entry.phase === 'commentary';
   entry.display.row.classList.toggle('commentary', commentary);
   entry.display.who.textContent = commentary ? '进度' : '助手';
   entry.display.content.textContent = entry.text;
-  if (follow) scrollMessages();
+  if (follow) transcript.scroll();
 }
 
 function drain(current, entry, finish) {
@@ -602,11 +635,11 @@ function stopProgress(current) {
 function toolProgress(current) {
   if (!current.voice || current.progressSpoken || current.progressTimer || current.firstSpeakable) return;
   current.progressTimer = setTimeout(() => {
-    if (turn !== current || current.ended || current.firstSpeakable || barge || !call?.ready) return;
+    if (turn !== current || current.ended || current.firstSpeakable || state.barge || !call?.ready) return;
     current.progressSpoken = true;
-    player.enqueue({
+    player.enqueue(current.playback, {
       text: current.progressText,
-      voice: current.settings.voice,
+      speed: current.settings.rate,
       onStart() { if (current.traceItem) current.traceItem.progress_spoken = true; },
     });
   }, 1800);
@@ -652,7 +685,7 @@ function processEvent(current, event) {
   return false;
 }
 
-async function send(text, timing) {
+async function send(text, timing, display) {
   if (!canCall() || !text.trim()) return;
   if (text.length > 12000) {
     showError('这条消息过长，请分段发送。');
@@ -663,19 +696,30 @@ async function send(text, timing) {
   for (const name of Object.keys(metrics)) {
     if (name !== 'interruption') showMetric(name, name === 'asr' ? timing?.asrMs : undefined);
   }
-  addMessage('user', text);
+  if (!display) transcript.add('user', text);
   history.push({ role: 'user', content: text });
   if (history.length > 16) history.splice(0, history.length - 16);
   const startedAt = clock();
   const current = {
     startedAt, traceItem: trace.begin(startedAt, timing ? 'voice' : 'text'),
     controller: new AbortController(), settings, items: new Map(), tools: new Set(), heard: [], timing, ended: false,
-    voice: Boolean(call?.ready && ttsReady), gaps: 0,
+    voice: Boolean(call?.ready && readyModels), gaps: 0,
     progressText: /[A-Za-z]/.test(text) && !/\p{Script=Han}/u.test(text)
       ? 'I’m checking. One moment.' : '我在查，稍等一下。',
   };
   turn = current;
-  if (timing) setMetric(current, 'asr', timing.asrMs);
+  if (current.voice) current.playback = player.begin();
+  if (timing) {
+    setMetric(current, 'asr', timing.asrMs);
+    setMetric(current, 'silenceWait', timing.silenceWaitMs);
+    setMetric(current, 'partialLag', timing.partialLag);
+    timing.traceItem = current.traceItem;
+    if (timing.cut && current.traceItem) current.traceItem.cut = true;
+  }
+  dispatch({ type: 'request-started' });
+  const thinkingTimer = setTimeout(() => {
+    if (turn === current && !current.firstSpeakable) showThinking(true);
+  }, 1200);
   const previousInterruption = interruption;
   interruption = '';
   const { signal } = current.controller;
@@ -701,6 +745,8 @@ async function send(text, timing) {
       .filter(entry => entry.phase !== 'commentary')
       .map(entry => entry.text).filter(Boolean).join('\n');
     rememberAnswer(current, answer);
+    expectingAnswer = /[？?][”’」』"]?\s*$/u.test(answer);
+    voice.configure(settings.speed, expectingAnswer);
     trace.finish(current.traceItem, 'completed', clock() - current.startedAt);
   } catch (error) {
     if (!signal.aborted) {
@@ -723,9 +769,14 @@ async function send(text, timing) {
       }
     }
   } finally {
+    clearTimeout(thinkingTimer);
     stopProgress(current);
     current.ended = true;
-    if (turn === current) render();
+    if (turn === current) {
+      showThinking(false);
+      if (current.playback) player.seal(current.playback);
+      else dispatch({ type: 'playback-ended', waiting: false });
+    }
   }
 }
 
@@ -736,12 +787,16 @@ function newSession({ forget = true } = {}) {
   updates?.stop();
   updates = undefined;
   pendingUpdates = [];
+  voiceQueue = [];
+  previousCommit = previousOutput = undefined;
+  expectingAnswer = false;
+  voice.configure(settings.speed, expectingAnswer);
+  clearInput();
   interrupt(false, 'new_conversation');
   history = [];
   conversation = undefined;
   interruption = '';
-  for (const entry of messages.querySelectorAll('.entry')) entry.remove();
-  $('empty').hidden = false;
+  transcript.clear();
   for (const name of Object.keys(metrics)) showMetric(name);
   showError();
 }
@@ -749,7 +804,9 @@ function newSession({ forget = true } = {}) {
 function openSettings() {
   $('instructions').value = settings.instructions;
   $('reading').value = settings.reading;
-  $('silence').value = String(settings.silence);
+  $('speed').value = settings.speed;
+  $('rate').value = String(settings.rate);
+  $('tones').checked = settings.tones;
   $('duplex').checked = settings.duplex;
   dialog.showModal();
 }
@@ -816,13 +873,14 @@ $('close-diagnostics').onclick = () => diagnostics.close();
 $('settings-form').onsubmit = event => {
   event.preventDefault();
   const next = {
-    reading: $('reading').value, silence: Number($('silence').value),
-    duplex: $('duplex').checked, instructions: $('instructions').value.trim(),
+    reading: $('reading').value, speed: $('speed').value, rate: Number($('rate').value),
+    tones: $('tones').checked, duplex: $('duplex').checked, instructions: $('instructions').value.trim(),
   };
-  const audioChanged = next.silence !== settings.silence || next.duplex !== settings.duplex;
+  const duplexChanged = next.duplex !== settings.duplex;
   settings = { ...settings, ...next };
-  store(PREFERENCES, JSON.stringify(next));
-  if (audioChanged) updateListening(true);
+  savePreferences(next);
+  voice.configure(settings.speed, expectingAnswer);
+  if (duplexChanged) clearInput();
   dialog.close();
   render();
 };
@@ -830,12 +888,15 @@ $('retry-connection').onclick = () => void refreshConnection();
 $('export-timing').onclick = () => trace.download();
 $('call').onclick = () => call ? hangUp() : void startCall();
 $('mute').onclick = () => {
-  muted = !muted;
-  call?.microphone?.setEnabled(!muted);
-  updateListening(true);
-  render();
+  dispatch({ type: 'mute' });
+  call?.microphone?.setEnabled(!state.muted);
+  clearInput();
 };
 $('interrupt').onclick = () => interrupt();
+$('orb').onclick = () => {
+  if (callPhase(state) === 'speaking') interrupt();
+  else voice.send({ type: 'force-commit' });
+};
 $('new-session').onclick = newSession;
 const composerToggle = $('toggle-composer');
 composerToggle.onclick = () => {

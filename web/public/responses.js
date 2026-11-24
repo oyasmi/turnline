@@ -6,7 +6,7 @@ export const CALL_INSTRUCTIONS = `你正在和用户实时通话。用用户当�
 
 能直接回答就直接回答。必须核实或执行时，只说有用的进展。区分准备做、正在做和已完成。耗时工作适合交给后台时，可以安排可追踪的任务，确认实际创建后再告诉用户。需要澄清时，一次只问一个能决定下一步的问题。
 
-用户可能在任意一句中间插话。优先回应他刚说的话。收到播报停点时，以最后完整播完的一句为准。用户说“接着说”，就从那里往下讲；用户改了方向，就跟随新方向。如实说明已经执行的操作。
+用户可能在任意一句中间插话。优先回应他刚说的话。收到播报停点时，以已播到的那段文字为准。用户说“接着说”，就从那里往下讲；用户改了方向，就跟随新方向。如实说明已经执行的操作。
 
 语音转写里的名字、数字或命令有歧义时，先用最短的一句话核对关键词。确认前不要搜索猜测的人名或执行猜测的命令。简单问候和确认只说一句。磁盘容量用口语读出，路径可以放在文字记录。`;
 
@@ -127,91 +127,4 @@ export async function openResponse(settings, { conversation, messages, text, voi
     throw new Error('后端没有返回 SSE。请检查该地址是否支持流式 Responses API。');
   }
   return readEvents(response.body);
-}
-
-export function speechText(text) {
-  const chinese = /\p{Script=Han}/u.test(text) || !/[A-Za-z]/.test(text);
-  const units = chinese
-    ? { TB: '太字节', GB: '吉字节', MB: '兆字节', KB: '千字节' }
-    : { TB: ' terabytes', GB: ' gigabytes', MB: ' megabytes', KB: ' kilobytes' };
-  return text
-    .replace(/`{3}[\s\S]*?(?:`{3}|$)/g, '')
-    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/https?:\/\/[^\s，。！？]+/g, '')
-    .replace(/^[ \t]*(?:#+|>|[-*+]\s|\d+\.\s)/gm, '')
-    .replace(/([+-]?\d+(?:\.\d+)?)\s*[%％]/gu, chinese ? '百分之$1' : '$1 percent')
-    .replace(/(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB)\b/gi, (_, number, unit) =>
-      number + units[unit.toUpperCase()])
-    .replace(/~\/\.([a-z][a-z\d-]*)(?![\w/-])/gi, chinese ? '家目录的点 $1' : 'home directory dot $1')
-    .replace(/[`*#~_《》]/g, '')
-    .trim();
-}
-
-const FIRST_SPEECH_CHARS = 21;
-
-function openingSpeechEnd(text) {
-  // Mask non-spoken material without changing the offsets into the original stream.
-  const visible = text.replace(/\x60{3}[\s\S]*?(?:\x60{3}|$)|!\[[^\]\n]*\]\([^)]*(?:\)|$)|(?<=\])\([^)]*(?:\)|$)|https?:\/\/[^\s，。！？]+/gu,
-    match => ' '.repeat(match.length));
-  let count = 0;
-  let earliestPause = 0;
-  let previousEnd = 0;
-  const words = /\p{Script=Han}|[A-Za-z][A-Za-z0-9]*(?:[.'_-][A-Za-z0-9]+)*|[0-9]+(?:[.,][0-9]+)*[%％]?|[\p{L}\p{N}]/gu;
-  for (const match of visible.matchAll(words)) {
-    const end = match.index + match[0].length;
-    count += (match[0].match(/[\p{L}\p{N}]/gu) ?? []).length;
-    if (!earliestPause && count >= 12) earliestPause = end;
-    if (count >= FIRST_SPEECH_CHARS) {
-      const pauseAt = visible.slice(earliestPause, end + 8);
-      const pauses = [...pauseAt.matchAll(/[。！？!?；;\n，、：]+|,(?!\d)|\.(?=\s)/gu)];
-      if (pauses.length) {
-        const pause = pauses.at(-1);
-        return earliestPause + pause.index + pause[0].length;
-      }
-      // A Latin word or number at the end of a delta can still be incomplete.
-      if (/^[.'_-]?$/u.test(visible.slice(end)) && /[A-Za-z0-9]$/u.test(match[0])) {
-        return previousEnd >= earliestPause ? previousEnd : 0;
-      }
-      return end;
-    }
-    previousEnd = end;
-  }
-  return 0;
-}
-
-export function splitSpeech(text, flush = false, opening = false) {
-  const phrases = [];
-  let rest = text;
-  if (opening && !flush) {
-    const end = openingSpeechEnd(rest);
-    if (!end) return { phrases, rest };
-    phrases.push(speechText(rest.slice(0, end)));
-    rest = rest.slice(end);
-  }
-  while (rest) {
-    const sentence = /[。！？!?；;\n]+|\.\s+/u.exec(rest);
-    let end = sentence ? sentence.index + sentence[0].length : 0;
-    // Bound the latency for unpunctuated text while avoiding tiny fragments.
-    if ((!end || end > 80) && rest.length >= 64) {
-      const soft = Math.max(rest.lastIndexOf('，', 63), rest.lastIndexOf('、', 63), rest.lastIndexOf(' ', 63));
-      end = soft >= 24 ? soft + 1 : 64;
-      if (end === 64 && /[A-Za-z0-9._-]/u.test(rest[end] ?? '')) {
-        const name = /[A-Za-z0-9]+(?:['’._-][A-Za-z0-9]+)*['’._-]?$/u.exec(rest.slice(0, end));
-        if (name && name.index >= 24) end = name.index;
-      }
-    }
-    if (!end && flush) end = rest.length;
-    if (!end) break;
-    // Keep fenced code intact until its closing fence or the end of the item.
-    if ((rest.slice(0, end).match(/`{3}/g)?.length ?? 0) % 2) {
-      const close = rest.indexOf('```', rest.indexOf('```') + 3);
-      if (close < 0 && !flush) break;
-      end = close < 0 ? rest.length : close + 3;
-    }
-    const phrase = speechText(rest.slice(0, end));
-    if (/[\p{L}\p{N}]/u.test(phrase)) phrases.push(phrase);
-    rest = rest.slice(end);
-  }
-  return { phrases, rest };
 }

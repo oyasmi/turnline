@@ -10,10 +10,10 @@ import httpx
 import numpy as np
 
 from server import tts
-from phonemizer import MatchaFrontend
+from phonemizer import MatchaFrontend, speech_text
 from setup_models import MATCHA, MODELS, SENSE_VOICE, SILERO
-from speech import DEFAULT_SILENCE_SECONDS, FRAME_SAMPLES, SAMPLE_RATE, ListeningTurn, RecognitionQueue
-from synthesis import SynthesisBusy, SynthesisQueue
+from speech import FRAME_SAMPLES, SAMPLE_RATE, RecognitionQueue, SpeechModels, VoiceActivity
+from synthesis import AUDIBLE_THRESHOLD, SpeechSlot, SynthesisBusy, SynthesisQueue, shape_audio
 from support import running
 
 
@@ -53,7 +53,45 @@ class BilingualSpeechTest(unittest.TestCase):
         self.assertEqual(tokens("重庆银行行长"), ["chong2", "qing4", "yin2", "hang2", "hang2", "zhang3"])
 
 
-class ListeningTurnTest(unittest.TestCase):
+    def test_shared_speech_normalizer_expands_percentages_units_and_paths(self):
+        self.assertEqual(speech_text("《红楼梦》。占用 37%，\x60~/.cache\x60 约 6.5GB。"),
+                         "红楼梦。占用 百分之37，家目录的点 cache 约 6.5吉字节。")
+        self.assertEqual(speech_text("Disk is at 37%. Cache takes 6.5GB."),
+                         "Disk is at 37 percent. Cache takes 6.5 gigabytes.")
+
+    def test_matcha_to_sensevoice_preserves_percentage_and_capacity(self):
+        if not (MODELS / SENSE_VOICE / "model.int8.onnx").is_file():
+            self.skipTest("Run setup_models.py to install SenseVoice.")
+        models = SpeechModels()
+        heard = []
+
+        def read_back(pcm, rate, *_):
+            audio = np.frombuffer(pcm, dtype="<f4")
+            indices = np.arange(0, len(audio) - 1, rate / SAMPLE_RATE)
+            audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+            heard.append(models.recognize(audio))
+
+        models.synthesize("磁盘已经使用37%，还剩6.5GB。", 0, Event(), read_back)
+        self.assertEqual(len(heard), 1)
+        self.assertIn("37%", heard[0])
+        self.assertIn("6.5", heard[0])
+        self.assertIn("字节", heard[0])
+
+
+class AudioShapingTest(unittest.TestCase):
+    def test_trims_edges_and_adds_pause_for_punctuation(self):
+        rate = 16_000
+        audio = np.pad(np.full(1600, 0.25, dtype="<f4"), (2560, 1728))
+        for text, pause in (("继续，", 0.12), ("结束。", 0.26), ("换一段。\n\n", 0.4)):
+            with self.subTest(text=text):
+                shaped = shape_audio(audio, rate, text, text.strip())
+                first = np.flatnonzero(np.abs(shaped) >= AUDIBLE_THRESHOLD)[0]
+                self.assertEqual(first, 320)
+                self.assertEqual(len(shaped), 320 + 1600 + round(rate * pause))
+                self.assertEqual(shaped[320 + 1599], 0)
+
+
+class VoiceActivityTest(unittest.TestCase):
     def test_rejects_a_short_clip_and_keeps_speech_across_a_normal_pause(self):
         fixture = MODELS / SENSE_VOICE / "test_wavs" / "zh.wav"
         if not fixture.is_file() or not (MODELS / SILERO).is_file():
@@ -64,15 +102,15 @@ class ListeningTurnTest(unittest.TestCase):
         active = np.flatnonzero(np.abs(signal) > 0.02)
         voice = signal[active[0]:active[-1] + 1]
         silence = np.zeros(3 * SAMPLE_RATE, dtype="<f4")
-        listener = ListeningTurn()
+        listener = VoiceActivity(minimum=0.32, silence=2.2, maximum=20)
 
         def detect(samples):
-            listener.reset(0, DEFAULT_SILENCE_SECONDS)
+            listener.reset()
             audio = np.concatenate((samples, silence))
             segments = []
             starts = 0
             for i in range(0, len(audio) - FRAME_SAMPLES + 1, FRAME_SAMPLES):
-                started, available = listener.accept(audio[i:i + FRAME_SAMPLES].tobytes())
+                started, available = listener.accept(audio[i:i + FRAME_SAMPLES])
                 starts += started
                 segments.extend(available)
             return starts, segments
@@ -116,6 +154,32 @@ class RecognitionQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await asyncio.wait_for(stale, 5))
         self.assertEqual(await asyncio.wait_for(fresh, 5), "fresh")
         self.assertEqual(calls, ["running", "fresh"])
+
+
+class SpeechPriorityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pending_synthesis_precedes_final_asr_and_partial_skips_busy_slot(self):
+        class Models:
+            def recognize(self, _samples):
+                order.append("recognition")
+
+        order = []
+        slot = SpeechSlot()
+        recognition = RecognitionQueue(Models(), slot)
+        await slot.acquire(0)
+
+        async def synthesize():
+            await slot.acquire(0)
+            order.append("synthesis")
+            slot.release()
+
+        final = asyncio.create_task(recognition.transcribe("audio", lambda: True))
+        await asyncio.sleep(0)
+        synthesis = asyncio.create_task(synthesize())
+        await asyncio.sleep(0)
+        self.assertIsNone(await recognition.transcribe("preview", lambda: True, final=False))
+        slot.release()
+        await asyncio.gather(synthesis, final)
+        self.assertEqual(order, ["synthesis", "recognition"])
 
 
 class SynthesisQueueTest(unittest.IsolatedAsyncioTestCase):

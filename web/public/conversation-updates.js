@@ -1,10 +1,11 @@
-import { listConversationItems, splitSpeech } from './responses.js';
+import { listConversationItems } from './responses.js';
+import { splitSpeech } from './chunker.js';
 
 export function updateSpeech(text) {
   const [heading, ...lines] = text.split('\n');
   if (/^\*\*.+\*\*$/u.test(heading.trim())) {
     const paragraph = lines.find(line => line.trim() && !/^\s*[-*+]\s/u.test(line));
-    text = paragraph ?? heading.trim().replace(/`[^`]*`\s*/gu, '').replace(/^[^\p{L}\p{N}]+/u, '');
+    text = paragraph ?? heading.trim().slice(2, -2).replace(/`[^`]*`\s*/gu, '').replace(/^[^\p{L}\p{N}]+/u, '');
   }
   return splitSpeech(text, true).phrases[0];
 }

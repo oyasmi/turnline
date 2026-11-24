@@ -12,22 +12,21 @@ from time import monotonic
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
-from starlette.websockets import WebSocketState
 import uvicorn
 
 from connection import (
     SESSION_SECONDS, Pipiclaw, SessionStore, default_socket, default_state, loopback, normalize_origin, session_cookie,
 )
 from http_support import ClientStream, error, read_json
-from speech import (
-    DEFAULT_SILENCE_SECONDS, LEGACY_SILENCE_OPTIONS, SILENCE_OPTIONS, ListeningTurn, RecognitionQueue, SpeechModels,
-)
-from synthesis import SynthesisBusy, SynthesisQueue
+from speech import RecognitionQueue, SpeechModels
+from synthesis import SpeechSlot, SynthesisBusy, SynthesisQueue
 from tls import certificates
+from voice_session import VoiceSession
+
 
 PUBLIC = Path(__file__).resolve().parent / "public"
 LOG = logging.getLogger("turnline")
@@ -156,78 +155,6 @@ async def tts(request, synthesis):
     return ClientStream(prepare)
 
 
-async def listen(ws, models, recognition):
-    await ws.accept()
-    listening = ListeningTurn()
-    jobs = asyncio.Queue(maxsize=2)
-    revision = 0
-    segment_number = 0
-    tasks = []
-
-    async def receive_audio():
-        nonlocal revision, segment_number
-        while (message := await ws.receive())["type"] != "websocket.disconnect":
-            if (text := message.get("text")) is not None:
-                reset = json.loads(text)
-                epoch, silence = reset["epoch"], reset["silence"]
-                if reset.get("type") != "reset" or type(epoch) is not int or type(silence) not in {int, float}:
-                    raise ValueError("无效的收音设置。")
-                silence = LEGACY_SILENCE_OPTIONS.get(silence, silence)
-                if silence not in SILENCE_OPTIONS:
-                    raise ValueError("无效的断句停顿。")
-                revision += 1
-                while not jobs.empty():
-                    jobs.get_nowait()
-                await asyncio.to_thread(listening.reset, epoch, silence)
-                continue
-            started, segments = listening.accept(message["bytes"])
-            if started:
-                await ws.send_json({"type": "speech-start", "epoch": listening.epoch})
-            for samples in segments:
-                segment_number += 1
-                event = {"epoch": listening.epoch, "segment": segment_number}
-                endpoint = monotonic()
-                await ws.send_json({"type": "speech-end", **event})
-                try:
-                    jobs.put_nowait((revision, event, endpoint, samples))
-                except asyncio.QueueFull as exc:
-                    raise ValueError("语音识别繁忙，请稍后重新开始通话。") from exc
-
-    async def transcribe():
-        while True:
-            ticket, event, endpoint, samples = await jobs.get()
-            result = await recognition.transcribe(samples, lambda: ticket == revision)
-            if result is not None and ticket == revision:
-                await ws.send_json({
-                    "type": "transcript", **event, "text": result,
-                    "asrMs": round((monotonic() - endpoint) * 1000),
-                })
-
-    try:
-        await asyncio.to_thread(models.prepare_recognition)
-        await asyncio.to_thread(listening.reset, 0, DEFAULT_SILENCE_SECONDS)
-        await ws.send_json({"type": "ready"})
-        tasks = [asyncio.create_task(receive_audio()), asyncio.create_task(transcribe())]
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
-    except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
-        if ws.client_state != WebSocketState.DISCONNECTED:
-            await ws.send_json({"type": "fatal", "message": str(exc)})
-    except (WebSocketDisconnect, OSError):
-        pass
-    except Exception:
-        LOG.exception("Speech recognition failed")
-        if ws.client_state != WebSocketState.DISCONNECTED:
-            await ws.send_json({"type": "fatal", "message": "SenseVoice 处理语音失败，请查看服务日志。"})
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if ws.client_state != WebSocketState.DISCONNECTED and ws.application_state != WebSocketState.DISCONNECTED:
-            await ws.close()
-
-
 async def demo(request: Request):
     body = await read_json(request)
     try:
@@ -285,8 +212,9 @@ async def demo(request: Request):
 
 def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=False, direct_only=False):
     models = SpeechModels(tts_threads=tts_threads)
-    synthesis = SynthesisQueue(models)
-    recognition = RecognitionQueue(models)
+    slot = SpeechSlot()
+    synthesis = SynthesisQueue(models, slot)
+    recognition = RecognitionQueue(models, slot)
     pipiclaw = None if demo_mode or direct_only else Pipiclaw(
         socket_path or default_socket(), SessionStore(state_dir or default_state())
     )
@@ -359,9 +287,9 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
     if demo_mode:
         app.add_api_route("/demo/v1/responses", demo, methods=["POST"])
 
-    @app.websocket("/speech/listen")
+    @app.websocket("/speech/voice")
     async def open_socket(ws: WebSocket):
-        await listen(ws, models, recognition)
+        await VoiceSession(ws, models, recognition, synthesis).run()
 
     @app.get("/speech/info")
     async def speech_info():

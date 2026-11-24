@@ -133,7 +133,7 @@ try {
   const first = 'https://' + firstHost + ':' + port;
   const second = 'https://' + secondHost + ':' + port;
 
-  browser = await chromium.launch({ args: [
+  browser = await chromium.launch({ channel: process.env.TURNLINE_TEST_BROWSER_CHANNEL, args: [
     '--ignore-certificate-errors-spki-list=' + pin,
     '--host-resolver-rules=MAP *.turnline.test 127.0.0.1',
     '--no-proxy-server',
@@ -191,8 +191,7 @@ try {
   await waitFor('.entry.assistant .content', answer.content[0].text);
   const cookies = await page.context().cookies(second);
   assert.ok(cookies.some(cookie => cookie.name === '__Host-turnline' && cookie.secure && cookie.httpOnly));
-  assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/listen'));
-  assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/synthesize'));
+  assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/voice'));
   assert.ok(turnlineRequests.some(entry => entry.host === secondHost + ':' + port &&
     entry.path === '/api/pipiclaw/v1/responses'));
   assert.ok(turnlineRequests.every(entry => !entry.authorization &&

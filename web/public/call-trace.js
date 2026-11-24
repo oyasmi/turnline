@@ -30,7 +30,7 @@ export class CallTrace {
   metric(item, name, value) {
     if (!item || !Number.isFinite(value)) return;
     item.timing_ms[name] = rounded(value);
-    if (name === 'audio') this.save();
+    if (['audio', 'perceived', 'bargeDuck', 'bargePause', 'bargeStop'].includes(name)) this.save();
   }
 
   finish(item, outcome, duration) {

@@ -3,23 +3,77 @@
 import asyncio
 from threading import Event
 
+import numpy as np
+
+
+class SpeechSlot:
+    """Run one native speech job at a time, in priority order."""
+
+    def __init__(self):
+        self.busy = False
+        self.waiters = []
+
+    async def acquire(self, priority):
+        if not self.busy:
+            self.busy = True
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        entry = (priority, waiter)
+        self.waiters.append(entry)
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if not waiter.cancelled():
+                self.release()
+            raise
+        finally:
+            self.waiters.remove(entry)
+
+    def release(self):
+        waiting = [entry for entry in self.waiters if not entry[1].done()]
+        if waiting:
+            min(waiting, key=lambda entry: entry[0])[1].set_result(None)
+        else:
+            self.busy = False
+
+
+AUDIBLE_THRESHOLD = 0.005
+
+
+def shape_audio(samples, rate, raw_text, text):
+    active = np.flatnonzero(np.abs(samples) >= AUDIBLE_THRESHOLD)
+    if not active.size:
+        raise ValueError("语音模型未生成可闻音频。")
+    start, end = int(active[0]), int(active[-1]) + 1
+    voice = samples[max(0, start - round(rate * 0.020)):end].copy()
+    fade = min(round(rate * 0.005), len(voice) // 2)
+    if fade:
+        ramp = np.linspace(0, 1, fade, dtype=np.float32)
+        voice[:fade] *= ramp
+        voice[-fade:] *= ramp[::-1]
+    pause = 0.4 if raw_text.endswith("\n\n") else (
+        0.12 if text.endswith((",", "，", "、", ":", "：")) else
+        0.26 if text.endswith((".", "。", "?", "？", "!", "！", ";", "；")) else 0.06
+    )
+    return np.pad(voice, (0, round(rate * pause))).astype("<f4", copy=False)
+
 
 class SynthesisBusy(Exception):
     pass
 
 
 class SynthesisQueue:
-    def __init__(self, models):
+    def __init__(self, models, slot=None):
         self.models = models
-        self.slot = asyncio.Lock()
+        self.slot = slot or SpeechSlot()
         self.waiting = 0
 
-    async def stream(self, text, speaker):
+    async def stream(self, text, speaker, speed=None):
         if self.waiting >= 2:
             raise SynthesisBusy("语音合成队列已满。请稍后重试。")
         self.waiting += 1
         try:
-            await self.slot.acquire()
+            await self.slot.acquire(0)
         finally:
             self.waiting -= 1
 
@@ -42,7 +96,8 @@ class SynthesisQueue:
 
         def run():
             try:
-                self.models.synthesize(text, speaker, cancelled, lambda *chunk: send(chunk))
+                args = () if speed is None else (speed,)
+                self.models.synthesize(text, speaker, cancelled, lambda *chunk: send(chunk), *args)
             except Exception as exc:
                 send(exc)
             else:

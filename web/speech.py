@@ -1,24 +1,21 @@
 """Local SenseVoice recognition and Matcha speech synthesis."""
 
 import asyncio
-from functools import cached_property
+from functools import cached_property, lru_cache
 from threading import Event, Lock
 from time import monotonic
 
 import numpy as np
 import sherpa_onnx
 
-from phonemizer import MatchaFrontend
+from phonemizer import MatchaFrontend, speech_text
 from setup_models import MATCHA, MATCHA_MODEL, MATCHA_VOCODER, MODELS, SENSE_VOICE, SILERO
+from synthesis import SpeechSlot, shape_audio
 
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512
-MIN_SPEECH_SECONDS = 0.32
-DEFAULT_SILENCE_SECONDS = 2.2
-SILENCE_OPTIONS = {1.0, 1.5, DEFAULT_SILENCE_SECONDS, 3.0}
-LEGACY_SILENCE_OPTIONS = {0.35: 1.0, 0.5: 1.5, 0.8: DEFAULT_SILENCE_SECONDS, 1.2: 3.0}
 VAD_BUFFER_SECONDS = 30
-PRE_ROLL_SAMPLES = 2 * FRAME_SAMPLES
+PRE_ROLL_SAMPLES = 6 * FRAME_SAMPLES
 HISTORY_CAPACITY = VAD_BUFFER_SECONDS * SAMPLE_RATE + PRE_ROLL_SAMPLES
 SETUP_HINT = "请在 Turnline 的 web/ 目录运行 uv run python setup_models.py。"
 
@@ -31,6 +28,7 @@ def require(*paths):
 class SpeechModels:
     engine = "matcha"
     voice_choices = ((0, "Matcha · 中英双语"),)
+    common_phrases = ("我在查，稍等一下。", "I’m checking. One moment.")
 
     def __init__(self, tts_threads=2):
         self.tts_threads = tts_threads
@@ -83,6 +81,8 @@ class SpeechModels:
 
     def warm_synthesis(self):
         self.synthesize("你好，hello。", 0, Event(), lambda *_: True)
+        for text in self.common_phrases:
+            self.cached_phrase(text, 1.07)
 
     def recognize(self, samples):
         with self.recognition_lock:
@@ -92,54 +92,55 @@ class SpeechModels:
             recognizer.decode_stream(stream)
             return stream.result.text.strip()
 
-    def synthesize(self, text, speaker, cancelled, publish):
+    @lru_cache(maxsize=8)
+    def cached_phrase(self, text, speed):
+        return self.generate(text, speed, Event())
+
+    def generate(self, text, speed, cancelled):
+        voice, frontend = self.matcha
+        config = sherpa_onnx.GenerationConfig()
+        config.speed = speed
+        normalized = speech_text(text)
+        tokens = frontend.tokens(normalized)
+        if not tokens:
+            raise ValueError("找不到可播报的文字。")
+        config.tokens = [tokens]
+        audio = voice.generate("", config, callback=lambda *_: int(not cancelled.is_set()))
+        if cancelled.is_set():
+            return None
+        pcm = np.asarray(audio.samples, dtype="<f4")
+        if not pcm.size or not np.isfinite(pcm).all():
+            raise RuntimeError("语音模型未生成可播放音频。")
+        pcm = shape_audio(pcm, voice.sample_rate, text, normalized)
+        return pcm.tobytes(), voice.sample_rate
+
+    def synthesize(self, text, speaker, cancelled, publish, speed=1.07):
         with self.synthesis_lock:
             if cancelled.is_set():
                 return
             started = monotonic()
-            voice, frontend = self.matcha
             if speaker != 0:
                 raise ValueError("请选择有效的音色。")
-            config = sherpa_onnx.GenerationConfig()
-            config.sid = speaker
-            config.speed = 1.07
-            tokens = frontend.tokens(text)
-            if not tokens:
-                raise ValueError("找不到可播报的文字。")
-            config.tokens = [tokens]
-            has_audio = False
-
-            def on_pcm(samples, _progress):
-                nonlocal has_audio
-                if cancelled.is_set():
-                    return 0
-                pcm = np.asarray(samples, dtype="<f4")
-                if not np.isfinite(pcm).all():
-                    raise RuntimeError("语音模型返回了无效音频。请重试或改用文字。")
-                if pcm.size and (has_audio or np.abs(pcm).max() > 1e-6):
-                    has_audio = True
-                    return int(publish(pcm.tobytes(), voice.sample_rate, started, monotonic()))
-                return 1
-
-            if cancelled.is_set():
-                return
-            voice.generate("", config, callback=on_pcm)
-            if not has_audio and not cancelled.is_set():
-                raise RuntimeError("语音模型未生成可播放音频。请重试或改用文字。")
+            audio = (self.cached_phrase(text, speed) if text in self.common_phrases
+                     else self.generate(text, speed, cancelled))
+            if audio is not None and not cancelled.is_set():
+                publish(*audio, started, monotonic())
 
 
 class RecognitionQueue:
-    def __init__(self, models):
+    def __init__(self, models, slot=None):
         self.models = models
-        self.slot = asyncio.Lock()
+        self.slot = slot or SpeechSlot()
         self.waiting = 0
 
-    async def transcribe(self, samples, is_current):
-        if self.waiting >= 2:
-            raise ValueError("语音识别繁忙，请稍后重新开始通话。")
+    async def transcribe(self, samples, is_current, *, final=True):
+        if not final and self.slot.busy:
+            return None
+        if self.waiting >= 4:
+            raise ValueError("语音识别繁忙，请再说一遍。")
         self.waiting += 1
         try:
-            await self.slot.acquire()
+            await self.slot.acquire(1 if final else 2)
         finally:
             self.waiting -= 1
         if not is_current():
@@ -162,21 +163,23 @@ class RecognitionQueue:
         return await asyncio.shield(worker)
 
 
-class ListeningTurn:
-    def __init__(self):
-        self.silence = None
-        self.epoch = 0
+class VoiceActivity:
+    def __init__(self, *, minimum=0.128, threshold=0.55, silence=0.256, maximum=8, preroll=PRE_ROLL_SAMPLES):
+        self.minimum = minimum
+        self.threshold = threshold
+        self.silence = silence
+        self.maximum = maximum
+        self.preroll = preroll
         self.detecting = False
         self.detector = None
         self.history = sherpa_onnx.CircularBuffer(HISTORY_CAPACITY)
         self.last_segment_end = 0
 
-    def reset(self, epoch, silence):
-        self.epoch = epoch
+    def reset(self):
         self.detecting = False
         self.history.reset()
         self.last_segment_end = 0
-        if self.detector is not None and silence == self.silence:
+        if self.detector is not None:
             self.detector.reset()
             return
         model = MODELS / SILERO
@@ -184,20 +187,14 @@ class ListeningTurn:
         config = sherpa_onnx.VadModelConfig()
         config.sample_rate = SAMPLE_RATE
         config.silero_vad.model = str(model)
-        config.silero_vad.threshold = 0.55
-        config.silero_vad.min_speech_duration = MIN_SPEECH_SECONDS
-        config.silero_vad.min_silence_duration = silence
-        config.silero_vad.max_speech_duration = 20.0
+        config.silero_vad.threshold = self.threshold
+        config.silero_vad.min_speech_duration = self.minimum
+        config.silero_vad.min_silence_duration = self.silence
+        config.silero_vad.max_speech_duration = self.maximum
         config.silero_vad.window_size = FRAME_SAMPLES
         self.detector = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=VAD_BUFFER_SECONDS)
-        self.silence = silence
 
-    def accept(self, payload):
-        if len(payload) != FRAME_SAMPLES * 4:
-            raise ValueError("需要 512 个 16 kHz 单声道浮点样本。")
-        samples = np.frombuffer(payload, dtype="<f4")
-        if not np.isfinite(samples).all():
-            raise ValueError("收到无效的音频样本。")
+    def accept(self, samples):
         excess = self.history.size + FRAME_SAMPLES - HISTORY_CAPACITY
         if excess > 0:
             self.history.pop(excess)
@@ -212,10 +209,10 @@ class ListeningTurn:
             samples = segment.samples
             # Silero can start after the first phoneme. Restore only audio from
             # this epoch and leave samples from previously delivered turns out.
-            prefix_start = max(self.history.head, self.last_segment_end, segment.start - PRE_ROLL_SAMPLES)
+            prefix_start = max(self.history.head, self.last_segment_end, segment.start - self.preroll)
             self.last_segment_end = segment.start + len(samples)
             if prefix_start < segment.start:
                 samples = self.history.get(prefix_start, segment.start - prefix_start) + samples
-            segments.append(samples)
+            segments.append((prefix_start, self.last_segment_end, np.asarray(samples, dtype=np.float32)))
             self.detector.pop()
         return started, segments
