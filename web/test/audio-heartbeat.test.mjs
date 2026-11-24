@@ -65,3 +65,27 @@ test('a minute-long background timer gap probes before closing a connection', co
   tick();
   assert.equal(closed, 1);
 });
+
+test('hold release sends buffered audio before force commit', context => {
+  const pending = [];
+  context.mock.method(globalThis, 'setTimeout', callback => { pending.push(callback); return pending.length; });
+  const voice = new VoiceSession(() => {});
+  const sent = [];
+  voice.ready = true;
+  voice.mode = 'listen';
+  voice.frameCount = 0;
+  voice.socket = {
+    bufferedAmount: 32 * 1024,
+    readyState: WebSocket.OPEN,
+    send: event => sent.push(event),
+  };
+  const audio = new Int16Array(512);
+  voice.frame(audio, 0, true);
+  voice.releaseInput();
+  assert.deepEqual(sent, []);
+  assert.equal(pending.length, 1);
+  voice.socket.bufferedAmount = 0;
+  pending[0]();
+  assert.equal(sent[0], audio);
+  assert.deepEqual(JSON.parse(sent[1]), { type: 'force-commit', release: true });
+});

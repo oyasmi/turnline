@@ -1,5 +1,5 @@
 import { AxeBuilder } from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { devices, expect, test } from '@playwright/test';
 
 const conversation = {
   id: 'answer_example', role: 'assistant', type: 'message', phase: 'final_answer',
@@ -161,6 +161,7 @@ test('safe Markdown, waiting audio, playback range and interruption', async ({ p
   await expect(page.locator('#status')).toHaveText('正在播报');
   await expect.poll(() => page.evaluate(() => CSS.highlights.has('spoken'))).toBeTruthy();
   await expect(page.locator('#stage-caption')).toContainText('第一句');
+  await expect(page.locator('#stage-caption')).not.toContainText('**');
   await page.waitForTimeout(600);
   await page.getByRole('button', { name: '打断', exact: true }).click();
   await expect(page.locator('.entry.assistant .flag')).toHaveText('在此打断');
@@ -168,6 +169,10 @@ test('safe Markdown, waiting audio, playback range and interruption', async ({ p
   expect(await page.evaluate(() => CSS.highlights.has('spoken'))).toBe(false);
   await page.getByRole('button', { name: '复制代码' }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('echo ok');
+  await page.getByRole('button', { name: '重播', exact: true }).click();
+  await expect.poll(() => voice.requests.some(event => event.type === 'say' && event.turn > turn)).toBeTruthy();
+  await page.getByRole('button', { name: '打断', exact: true }).click();
+  await expect(page.locator('.entry.user')).toHaveCount(1);
 });
 
 test('hold-to-talk gates microphone frames and release commits once', async ({ page }) => {
@@ -194,6 +199,29 @@ test('hold-to-talk gates microphone frames and release commits once', async ({ p
   const released = voice.frames;
   await page.waitForTimeout(150);
   expect(voice.frames).toBe(released);
+});
+
+test.describe('Android touch emulation', () => {
+  const { deviceScaleFactor, hasTouch, isMobile, viewport, userAgent } = devices['Pixel 7'];
+  test.use({ deviceScaleFactor, hasTouch, isMobile, viewport, userAgent });
+
+  test('swipe the transcript control to expand and collapse', async ({ page, context }) => {
+    await fixture(page);
+    await startCall(page);
+    const toggle = page.locator('#expand-transcript');
+    const cdp = await context.newCDPSession(page);
+    const drag = async delta => {
+      const box = await toggle.boundingBox();
+      const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y + delta }] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    await drag(-60);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await drag(60);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  });
 });
 
 test('idle, calling and settings have no serious axe violations', async ({ page }) => {

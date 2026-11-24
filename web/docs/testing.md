@@ -56,3 +56,5 @@ TURNLINE_TEST_ECHO_SECONDS=600 npm run test:browser
 `npm run test:interface` 检查 1440×900、1280×720、390×844、360×640 四种尺寸的深浅主题，在空闲和等待提交状态对比 16 张截图。测试也覆盖缩小视口后的输入框、Markdown 链接、思考音、语音高亮与断点、按住说话和 axe 严重问题。用 `npm run test:interface -- --update-snapshots` 刷新基线。
 
 `npm test` 里的心跳回归模拟后台定时器间隔跳到 60 秒，检查恢复后先发探测，以及前台连续无响应时依然断开。滤波测试覆盖常见设备采样率、语音频段和高频混叠。实际 Android 设备上的外放、蓝牙和锁屏音频仍需现场验证。
+
+`npm run test:background` 会用 Chrome 的正常后台计时策略将通话标签页隐藏 605 秒，并检查仍使用原来的 WebSocket。先用 `npx playwright install chromium` 安装带界面的 Chromium。无桌面的 Linux 可以运行 `xvfb-run -a npm run test:background`。

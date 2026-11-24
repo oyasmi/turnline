@@ -454,6 +454,7 @@ function interrupt(note = true, reason = 'interrupted') {
   waiting.stop();
   dispatch({ type: 'playback-ended', waiting: false });
   if (hadOutput) {
+    if (note && call?.ready) vibrate(settings.tones);
     const display = point?.display ?? previous.answer[0]?.display;
     const at = position?.entry.range ? sourcePosition(point, fragment) : point?.end ?? 0;
     transcript.interrupted(display, at);
@@ -490,7 +491,6 @@ function onBarge(event) {
       const preceding = turn?.traceItem;
       trace.metric(preceding, 'bargeStop', clock() - event.at);
       inputTelemetry.stopAt = event.at;
-      vibrate(settings.tones);
       interrupt();
       // The in-progress interruption is now an ordinary user utterance.
       dispatch({ type: 'speech-start', input: state.inputId, duringPlayback: false });
@@ -580,6 +580,7 @@ function onVoice(event) {
   }
   if (['reconnecting', 'input-gap', 'input-error'].includes(event.type)) {
     if (event.input !== undefined && event.input !== state.inputId) return;
+    if (held || releasing) voice.reset();
     held = releasing = false;
     configureVoice();
     if (event.type === 'reconnecting') {
@@ -978,8 +979,7 @@ function releaseHold(commit) {
   held = false;
   if (commit && voice.ready) {
     releasing = true;
-    voice.flush();
-    voice.send({ type: 'force-commit', release: true });
+    voice.releaseInput();
   } else {
     clearInput();
     finishHold();

@@ -106,8 +106,9 @@ export function speakCaption(text, heard = '') {
   if (caption.dataset.kind === 'draft' && caption.textContent) return;
   caption.dataset.kind = 'assistant';
   const rest = document.createElement('span');
-  rest.textContent = text.slice(heard.length);
-  caption.replaceChildren(document.createTextNode(heard), rest);
+  const captionText = value => value.replace(/[*`\[\]]|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '');
+  rest.textContent = captionText(text.slice(heard.length));
+  caption.replaceChildren(document.createTextNode(captionText(heard)), rest);
 }
 
 export function clearCaption(kind) {

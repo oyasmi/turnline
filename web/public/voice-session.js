@@ -178,6 +178,7 @@ export class VoiceSession {
   }
 
   reset() {
+    this.clearRelease();
     this.epoch++;
     this.lostFrames = this.lostSpeech = false;
     this.buffer.length = 0;
@@ -195,6 +196,16 @@ export class VoiceSession {
       this.lostFrames = true;
     }
     this.flush();
+  }
+
+  releaseInput() {
+    this.releaseAt = performance.now();
+    this.flush();
+  }
+
+  clearRelease() {
+    clearTimeout(this.releaseTimer);
+    this.releaseTimer = this.releaseAt = undefined;
   }
 
   flush() {
@@ -219,6 +230,19 @@ export class VoiceSession {
     if (congested !== this.congested) {
       this.congested = congested;
       this.onEvent({ type: 'congestion', congested });
+    }
+    if (this.releaseAt === undefined) return;
+    if (!congested) {
+      this.clearRelease();
+      this.send({ type: 'force-commit', release: true });
+    } else if (performance.now() - this.releaseAt >= 1500) {
+      this.reset();
+      this.onEvent({ type: 'input-gap', voiced: true });
+    } else if (!this.releaseTimer) {
+      this.releaseTimer = setTimeout(() => {
+        this.releaseTimer = undefined;
+        this.flush();
+      }, 32);
     }
   }
 
@@ -288,6 +312,7 @@ export class VoiceSession {
     this.socket = this.connecting = undefined;
     this.ready = this.reconnecting = this.congested = this.lostFrames = this.lostSpeech = false;
     clearInterval(this.heartbeat);
+    this.clearRelease();
     this.cancel(Infinity);
     this.buffer.length = 0;
     this.times.clear();

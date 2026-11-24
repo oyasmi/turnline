@@ -56,7 +56,7 @@ main { display: flex; flex: 1; flex-direction: column; gap: 12px; padding-block:
 .stage-caption:not(:empty) { margin-top: 10px; }
 .stage-caption[data-kind="draft"] { color: var(--scope-user); }
 .stage-caption[data-kind="assistant"] { color: var(--scope-assistant); }
-.stage-caption[data-kind="assistant"] span { opacity: .72; }
+.stage-caption[data-kind="assistant"] span { color: var(--quiet); }
 .stage-progress { display: flex; gap: 9px; align-items: center; color: var(--muted); margin-top: 7px; }
 .stage-progress span { display: block; flex: 1; height: 3px; background: var(--soft-line); border-radius: 4px; overflow: hidden; }
 .stage-progress span::after { display: block; content: ""; height: 100%; background: var(--scope-user); transform-origin: left; animation: countdown var(--wait) linear forwards; }
@@ -182,6 +182,16 @@ textarea { resize: vertical; }
   .call-actions { gap: 13px; }
   .call-actions .round, .call-actions .hang-up { padding: 0; height: 52px; min-height: 52px; min-width: 52px; width: 52px; border-radius: 50%; }
   .call-actions .hang-up { width: 58px; height: 58px; }
+  .call-actions .interrupt {
+    position: absolute;
+    inset-inline-end: 12px;
+    bottom: 19px;
+    width: var(--target);
+    height: var(--target);
+    min-height: var(--target);
+    min-width: var(--target);
+  }
+  .call-actions .interrupt:disabled { display: none; }
   .call-actions :is(.round, .hang-up) span { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
   .shortcut-hint { display: none; }
   #toggle-composer, #expand-transcript { display: inline-flex; }
