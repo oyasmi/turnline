@@ -1,4 +1,4 @@
-"""Device pairing and the same-origin bridge to the local Pipiclaw socket."""
+"""Browser conversation ownership and the bridge to the local Pipiclaw socket."""
 
 import asyncio
 from contextlib import asynccontextmanager, closing
@@ -18,8 +18,8 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from http_support import ClientStream, error, read_json
 
-PAIR_SECONDS = 15 * 60
-DEVICE_SECONDS = 7 * 24 * 3600
+SESSION_SECONDS = 365 * 24 * 3600
+RENEW_WINDOW = 30 * 24 * 3600
 CONVERSATION_ID = re.compile(r"conv_[a-f0-9]{32}")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 UNAVAILABLE = "Turnline 无法连接 Pipiclaw，请检查服务端连接。"
@@ -67,7 +67,7 @@ def normalize_origin(value):
     return f"{url.scheme}://{host}"
 
 
-class DeviceStore:
+class SessionStore:
     def __init__(self, directory):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = directory / "devices.sqlite3"
@@ -75,7 +75,6 @@ class DeviceStore:
         os.close(fd)
         with closing(self.open()) as db:
             db.executescript("""
-                CREATE TABLE IF NOT EXISTS pairing (token TEXT PRIMARY KEY, expires INTEGER);
                 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, expires INTEGER);
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE
@@ -87,43 +86,29 @@ class DeviceStore:
         db.execute("PRAGMA foreign_keys = ON")
         return db
 
-    def issue(self):
-        token = token_urlsafe(32)
+    def start(self, token):
+        """Return a cookie to set, or None if the browser's cookie is current."""
         now = int(time())
         with closing(self.open()) as db, db:
-            db.execute("DELETE FROM pairing WHERE expires <= ?", (now,))
-            db.execute("DELETE FROM devices WHERE expires <= ?", (now,))
-            db.execute("INSERT INTO pairing VALUES (?, ?)", (digest(token), now + PAIR_SECONDS))
-        return token
+            if token and TOKEN.fullmatch(token):
+                identity = digest(token)
+                row = db.execute("SELECT expires FROM devices WHERE id = ?", (identity,)).fetchone()
+                if row:
+                    if row[0] > now + RENEW_WINDOW:
+                        return None
+                    db.execute("UPDATE devices SET expires = ? WHERE id = ?", (now + SESSION_SECONDS, identity))
+                    return token
+            token = token_urlsafe(32)
+            db.execute("INSERT INTO devices VALUES (?, ?)", (digest(token), now + SESSION_SECONDS))
+            return token
 
-    def redeem(self, token, previous=None):
-        if not isinstance(token, str) or not TOKEN.fullmatch(token):
-            return None
-        session = token_urlsafe(32)
-        now = int(time())
-        with closing(self.open()) as db, db:
-            deleted = db.execute("DELETE FROM pairing WHERE token = ? AND expires > ?", (digest(token), now))
-            if not deleted.rowcount:
-                return None
-            if previous and TOKEN.fullmatch(previous):
-                renewed = db.execute("UPDATE devices SET expires = ? WHERE id = ? AND expires > ?",
-                                     (now + DEVICE_SECONDS, digest(previous), now))
-                if renewed.rowcount:
-                    return previous
-            db.execute("INSERT INTO devices VALUES (?, ?)", (digest(session), now + DEVICE_SECONDS))
-        return session
-
-    def device(self, token):
+    def identity(self, token):
         if not token or not TOKEN.fullmatch(token):
             return None
         identity = digest(token)
         with closing(self.open()) as db:
             row = db.execute("SELECT 1 FROM devices WHERE id = ? AND expires > ?", (identity, int(time()))).fetchone()
         return identity if row else None
-
-    def revoke(self, device):
-        with closing(self.open()) as db, db:
-            db.execute("DELETE FROM devices WHERE id = ?", (device,))
 
     def own(self, conversation, device):
         with closing(self.open()) as db, db:
@@ -147,8 +132,8 @@ def session_cookie(request):
 
 
 class Pipiclaw:
-    def __init__(self, socket_path, devices):
-        self.devices = devices
+    def __init__(self, socket_path, sessions):
+        self.sessions = sessions
         self.client = httpx.AsyncClient(
             base_url="http://localhost/v1",
             transport=httpx.AsyncHTTPTransport(uds=str(socket_path), limits=httpx.Limits(max_connections=24)),
@@ -187,12 +172,12 @@ class Pipiclaw:
         conversation = payload.get("id") if isinstance(payload, dict) else None
         if not isinstance(conversation, str) or not CONVERSATION_ID.fullmatch(conversation):
             return error("Pipiclaw 未返回有效的会话。请重试。", 502)
-        if not await asyncio.to_thread(self.devices.own, conversation, device):
-            return error("请重新配对 Turnline。", 401)
+        if not await asyncio.to_thread(self.sessions.own, conversation, device):
+            return error("浏览器会话已过期，请刷新页面后重试。", 401)
         return JSONResponse({"id": conversation})
 
     async def conversation_items(self, request, conversation, device):
-        if not await asyncio.to_thread(self.devices.owns, conversation, device):
+        if not await asyncio.to_thread(self.sessions.owns, conversation, device):
             return error("找不到此设备的会话。请开始新对话。", 404)
         params = {key: request.query_params[key] for key in ("after", "limit", "order") if key in request.query_params}
         try:
@@ -206,7 +191,7 @@ class Pipiclaw:
         if not isinstance(candidate, dict):
             return error("请发送有效的对话内容。")
         conversation, message = candidate.get("conversation"), candidate.get("input")
-        if not await asyncio.to_thread(self.devices.owns, conversation, device):
+        if not await asyncio.to_thread(self.sessions.owns, conversation, device):
             return error("找不到此设备的会话。请开始新对话。", 404)
         if not isinstance(message, str) or not 0 < len(message.strip()) <= 12_000:
             return error("请发送 1 至 12000 字的消息。")

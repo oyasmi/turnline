@@ -24,11 +24,6 @@
       <p id="connection-detail">正在检查连接。</p>
       <button id="retry-connection" type="button" class="button subtle" hidden>重试连接</button>
       <button id="setup-direct" type="button" class="button subtle" hidden>设置直连</button>
-      <form id="pair-form" class="connection-form" hidden>
-        <label class="sr-only" for="pair-code">一次性配对码</label>
-        <input id="pair-code" placeholder="粘贴一次性配对码" maxlength="43" autocomplete="off" spellcheck="false" required>
-        <button class="button primary" type="submit">配对</button>
-      </form>
     </section>
 
     <div class="workspace">
@@ -121,7 +116,6 @@
       <div class="dialog-actions">
         <a id="switch-mode" class="button subtle" href="/direct" hidden>浏览器直连</a>
         <button id="edit-direct" class="button subtle" type="button" hidden>直连设置</button>
-        <button id="sign-out" class="button subtle" type="button" hidden>解除设备配对</button>
         <button class="button primary" type="submit">保存设置</button>
       </div>
     </form>

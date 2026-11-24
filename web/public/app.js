@@ -80,7 +80,6 @@ let settings = {
 let connection = 'checking';
 let connectionDetail;
 let connectionGeneration = 0;
-let sessionPaired = false;
 let relayAvailable = false;
 let conversation;
 let opening;
@@ -134,7 +133,6 @@ function renderConnection() {
   const { label, detail } = {
     checking: { label: '正在连接', detail: '正在检查连接。' },
     ready: { label: 'Pipiclaw 已连接', detail: '' },
-    pair: { label: '等待配对', detail: '打开配对链接，或从 Turnline 服务端获取一次性配对码。' },
     setup: { label: '等待设置', detail: '填写你自己的 Pipiclaw 地址和 Key。' },
     offline: { label: 'Pipiclaw 离线', detail: '请启动 Pipiclaw，再重试连接。' },
     demo: { label: '离线演示', detail: '' },
@@ -144,10 +142,8 @@ function renderConnection() {
   $('connection-panel').hidden = !detail;
   $('connection-detail').textContent = connectionDetail ?? detail;
   $('retry-connection').hidden = connection !== 'offline';
-  $('pair-form').hidden = connection !== 'pair';
-  $('setup-direct').hidden = !directMode || !sessionPaired || !['setup', 'offline'].includes(connection);
-  $('edit-direct').hidden = !directMode || !sessionPaired;
-  $('sign-out').hidden = !sessionPaired;
+  $('setup-direct').hidden = !directMode || !['setup', 'offline'].includes(connection);
+  $('edit-direct').hidden = !directMode;
   $('switch-mode').hidden = !relayAvailable;
   $('switch-mode').href = directMode ? '/' : '/direct';
   $('switch-mode').textContent = directMode ? '服务端中转' : '浏览器直连';
@@ -190,28 +186,19 @@ function directFailure(error) {
   return error.status === 401 ? 'Pipiclaw 拒绝了这把 Key，请核对或更换 Key。' : error.message;
 }
 
-async function refreshConnection(pairing, directChecked = false) {
+async function refreshConnection(directChecked = false) {
   const generation = ++connectionGeneration;
   connection = 'checking';
   connectionDetail = undefined;
   renderConnection();
   try {
-    if (pairing) {
-      const paired = await fetch('/api/pair', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: pairing }), signal: AbortSignal.timeout(7_000),
-      });
-      if (generation !== connectionGeneration) return;
-      if (!paired.ok) showError('配对码已使用或失效，请生成新的配对码。');
-    }
     const path = directMode ? '/api/session?mode=direct' : '/api/session';
     const response = await fetch(path, { signal: AbortSignal.timeout(7_000), cache: 'no-store' });
     if (!response.ok) throw new Error('Connection check failed.');
     const { connection: state, relay: available } = await response.json();
-    if (!['pair', 'ready', 'offline', 'demo', 'direct'].includes(state)) throw new Error('Bad connection state.');
+    if (!['ready', 'offline', 'demo', 'direct'].includes(state)) throw new Error('Bad connection state.');
     if (generation !== connectionGeneration) return;
     relayAvailable = available === true;
-    sessionPaired = state !== 'pair' && state !== 'demo';
     connection = state;
     if (state === 'demo') settings = { ...settings, mode: 'demo', model: 'demo', url: '/demo/v1', context: 'history' };
     if (state === 'direct') {
@@ -236,15 +223,6 @@ async function refreshConnection(pairing, directChecked = false) {
     }
   }
   if (generation === connectionGeneration) renderConnection();
-}
-
-function acceptPairingLink() {
-  const token = new URLSearchParams(location.hash.slice(1)).get('pair');
-  if (token) {
-    window.history.replaceState(window.history.state, '', location.pathname + location.search);
-    void refreshConnection(token);
-  }
-  return Boolean(token);
 }
 
 function ensureConversation() {
@@ -721,11 +699,11 @@ async function send(text, timing) {
           settings = { ...settings, key: '' };
           connection = 'setup';
           connectionDetail = directFailure(error);
+          renderConnection();
         } else {
-          sessionPaired = false;
-          connection = 'pair';
+          showError('正在刷新浏览器会话，请稍后重新发送。');
+          void refreshConnection();
         }
-        renderConnection();
       }
     }
   } finally {
@@ -792,7 +770,7 @@ $('direct-form').onsubmit = async event => {
       saveDirectSettings(url, key);
     }
     directDialog.close();
-    void refreshConnection(undefined, true);
+    void refreshConnection(true);
   } catch (error) {
     if (!controller.signal.aborted) showError(directFailure(error), $('direct-error'));
   } finally {
@@ -815,16 +793,6 @@ $('forget-direct').onclick = () => {
   directDialog.close();
   void refreshConnection();
 };
-$('pair-form').onsubmit = event => {
-  event.preventDefault();
-  const code = $('pair-code').value.trim();
-  $('pair-code').value = '';
-  if (code) {
-    showError();
-    void refreshConnection(code);
-  }
-};
-
 $('open-settings').onclick = openSettings;
 $('close-settings').onclick = () => dialog.close();
 $('settings-form').onsubmit = event => {
@@ -842,22 +810,6 @@ $('settings-form').onsubmit = event => {
 };
 $('retry-connection').onclick = () => void refreshConnection();
 $('export-timing').onclick = () => trace.download();
-$('sign-out').onclick = async () => {
-  try {
-    const response = await fetch('/api/sign-out', { method: 'POST', signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) throw new Error();
-    dialog.close();
-    hangUp();
-    newSession();
-    if (directMode) {
-      saveDirectSettings(settings.url, '');
-      settings = { ...settings, key: '' };
-    }
-    void refreshConnection();
-  } catch {
-    showError('退出失败，请重试。');
-  }
-};
 $('call').onclick = () => call ? hangUp() : void startCall();
 $('mute').onclick = () => {
   muted = !muted;
@@ -877,8 +829,6 @@ $('composer').onsubmit = event => {
 
 setInterval(updateDuration, 250);
 window.addEventListener('pagehide', hangUp);
-window.addEventListener('hashchange', acceptPairingLink);
 trace.save();
 if (directMode) $('home').href = '/direct';
-if (!acceptPairingLink()) void refreshConnection();
-render();
+void refreshConnection();

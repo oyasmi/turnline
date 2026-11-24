@@ -14,13 +14,13 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 import uvicorn
 
 from connection import (
-    DEVICE_SECONDS, DeviceStore, Pipiclaw, default_socket, default_state, loopback, normalize_origin, session_cookie,
+    SESSION_SECONDS, Pipiclaw, SessionStore, default_socket, default_state, loopback, normalize_origin, session_cookie,
 )
 from http_support import ClientStream, error, read_json
 from speech import ListeningTurn, RecognitionQueue, SpeechModels
@@ -33,14 +33,14 @@ PORT = 8686
 DIRECT_CONNECT = " https: http://127.0.0.1:* http://localhost:* http://[::1]:*"
 
 
-def browser_origin(scope, headers, tunnel):
+def browser_origin(scope, headers):
     scheme = {"ws": "http", "wss": "https"}.get(scope["scheme"], scope["scheme"])
     hosts = headers.getlist("host")
     if len(hosts) != 1 or any(char in hosts[0] for char in "/,@"):
         raise ValueError("Invalid Host header.")
     host = hosts[0]
     peer = scope.get("client")
-    if tunnel and peer and loopback(peer[0]):
+    if peer and loopback(peer[0]):
         forwarded = headers.getlist("x-forwarded-host")
         if forwarded:
             if len(forwarded) != 1 or any(char in forwarded[0] for char in "/,@"):
@@ -51,16 +51,15 @@ def browser_origin(scope, headers, tunnel):
             if len(proto) != 1 or proto[0] not in {"http", "https"}:
                 raise ValueError("Invalid forwarded protocol.")
             scheme = proto[0]
-        elif not loopback(urlsplit("//" + host).hostname):
-            # Some HTTPS tunnel agents preserve Host and send no forwarding headers.
+        elif scheme == "http" and not loopback(urlsplit("//" + host).hostname):
+            # A local HTTPS ingress may preserve Host without forwarding the scheme.
             scheme = "https"
     return normalize_origin(f"{scheme}://{host}")
 
 
 class BrowserBoundary:
-    def __init__(self, app, *, tunnel, demo_mode):
+    def __init__(self, app, *, demo_mode):
         self.app = app
-        self.tunnel = tunnel
         self.demo_mode = demo_mode
 
     async def __call__(self, scope, receive, send):
@@ -70,7 +69,7 @@ class BrowserBoundary:
             return
         headers = Headers(scope=scope)
         try:
-            origin = browser_origin(scope, headers, self.tunnel)
+            origin = browser_origin(scope, headers)
             if self.demo_mode and not loopback(urlsplit(origin).hostname):
                 raise ValueError("Demo requires a loopback origin.")
         except ValueError:
@@ -276,12 +275,13 @@ async def demo(request: Request):
     return StreamingResponse(events(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
 
-def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=False, direct_only=False, tunnel=False):
+def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=False, direct_only=False):
     models = SpeechModels(tts_threads=tts_threads)
     synthesis = SynthesisQueue(models)
     recognition = RecognitionQueue(models)
-    devices = None if demo_mode else DeviceStore(state_dir or default_state())
-    pipiclaw = Pipiclaw(socket_path or default_socket(), devices) if devices and not direct_only else None
+    pipiclaw = None if demo_mode or direct_only else Pipiclaw(
+        socket_path or default_socket(), SessionStore(state_dir or default_state())
+    )
 
     async def warm(name, run):
         try:
@@ -299,23 +299,18 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
                 await pipiclaw.client.aclose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
-    app.add_middleware(BrowserBoundary, tunnel=tunnel, demo_mode=demo_mode)
+    app.add_middleware(BrowserBoundary, demo_mode=demo_mode)
     app.mount("/assets", StaticFiles(directory=PUBLIC))
 
     @app.exception_handler(HTTPException)
     async def http_error(_request, exc):
         return error(exc.detail, exc.status_code)
 
-    async def device(connection):
-        if devices:
-            cookie, _ = session_cookie(connection)
-            return await asyncio.to_thread(devices.device, connection.cookies.get(cookie))
-        return None
-
-    async def require_device(request: Request):
-        identity = await device(request)
-        if devices and not identity:
-            raise HTTPException(401, "请先配对此设备。")
+    async def require_session(request: Request):
+        cookie, _ = session_cookie(request)
+        identity = await asyncio.to_thread(pipiclaw.sessions.identity, request.cookies.get(cookie))
+        if not identity:
+            raise HTTPException(401, "浏览器会话尚未就绪，请刷新页面后重试。")
         return identity
 
     @app.api_route("/", methods=["GET", "HEAD"])
@@ -330,47 +325,27 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
     async def session(request: Request):
         if demo_mode:
             return {"connection": "demo"}
-        result = {"relay": pipiclaw is not None}
-        if not await device(request):
-            return {"connection": "pair", **result}
-        if pipiclaw and request.query_params.get("mode") != "direct":
-            return {"connection": await pipiclaw.status(), **result}
-        return {"connection": "direct", **result}
-
-    if devices:
-        @app.post("/api/pair")
-        async def pair(request: Request):
-            body = await read_json(request)
-            token = body.get("token") if isinstance(body, dict) else None
-            cookie, secure = session_cookie(request)
-            session_id = await asyncio.to_thread(devices.redeem, token, request.cookies.get(cookie))
-            if session_id is None:
-                return error("配对码已使用或失效。请在 Turnline 服务器生成新的配对码。", 401)
-            response = Response(status_code=204)
-            response.set_cookie(cookie, session_id, path="/", max_age=DEVICE_SECONDS,
+        if not pipiclaw or request.query_params.get("mode") == "direct":
+            return {"connection": "direct", "relay": pipiclaw is not None}
+        cookie, secure = session_cookie(request)
+        token = await asyncio.to_thread(pipiclaw.sessions.start, request.cookies.get(cookie))
+        response = JSONResponse({"connection": await pipiclaw.status(), "relay": True})
+        if token:
+            response.set_cookie(cookie, token, path="/", max_age=SESSION_SECONDS,
                                 secure=secure, httponly=True, samesite="strict")
-            return response
-
-        @app.post("/api/sign-out")
-        async def sign_out(request: Request):
-            if identity := await device(request):
-                await asyncio.to_thread(devices.revoke, identity)
-            cookie, secure = session_cookie(request)
-            response = Response(status_code=204)
-            response.delete_cookie(cookie, path="/", secure=secure, httponly=True, samesite="strict")
-            return response
+        return response
 
     if pipiclaw:
         @app.post("/api/pipiclaw/v1/conversations")
-        async def create_conversation(identity=Depends(require_device)):
+        async def create_conversation(identity=Depends(require_session)):
             return await pipiclaw.create_conversation(identity)
 
         @app.get("/api/pipiclaw/v1/conversations/{conversation}/items")
-        async def conversation_items(request: Request, conversation: str, identity=Depends(require_device)):
+        async def conversation_items(request: Request, conversation: str, identity=Depends(require_session)):
             return await pipiclaw.conversation_items(request, conversation, identity)
 
         @app.post("/api/pipiclaw/v1/responses")
-        async def responses(request: Request, identity=Depends(require_device)):
+        async def responses(request: Request, identity=Depends(require_session)):
             return await pipiclaw.responses(request, identity)
 
     if demo_mode:
@@ -378,16 +353,13 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
 
     @app.websocket("/speech/listen")
     async def open_socket(ws: WebSocket):
-        if devices and not await device(ws):
-            await ws.close(code=1008)
-            return
         await listen(ws, models, recognition)
 
-    @app.get("/speech/info", dependencies=[Depends(require_device)])
+    @app.get("/speech/info")
     async def speech_info():
         return tts_info(models)
 
-    @app.post("/speech/prepare", dependencies=[Depends(require_device)])
+    @app.post("/speech/prepare")
     async def prepare():
         try:
             speakers = await asyncio.to_thread(models.prepare_synthesis)
@@ -398,7 +370,7 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
             LOG.exception("TTS initialization failed")
             return error("语音合成模型初始化失败，请查看服务日志。", 500)
 
-    @app.post("/speech/synthesize", dependencies=[Depends(require_device)])
+    @app.post("/speech/synthesize")
     async def generate(request: Request):
         return await tts(request, synthesis)
 
@@ -407,13 +379,11 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", choices=("serve", "pair"), default="serve")
+    parser.add_argument("command", nargs="?", choices=("serve",), default="serve")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--public-url", default=os.environ.get("TURNLINE_PUBLIC_URL"),
-                        help="Address for pairing links or the name for a self-issued certificate")
-    parser.add_argument("--code", action="store_true", help="Print a pairing code for the browser's current address")
-    parser.add_argument("--tunnel", action="store_true", help="Accept HTTPS forwarding from a loopback tunnel agent")
+                        help="Browser address to display or use for a self-issued certificate")
     parser.add_argument("--tls-cert", type=Path, help="PEM certificate chain for direct HTTPS")
     parser.add_argument("--tls-key", type=Path, help="PEM private key for direct HTTPS")
     parser.add_argument("--self-signed", action="store_true", help="Issue a certificate with a local Turnline CA")
@@ -430,22 +400,9 @@ def main():
         public_url = normalize_origin(options.public_url) if options.public_url else None
         if not 0 <= options.port <= 65535:
             raise ValueError("Port must be between 0 and 65535.")
-        if options.command == "pair":
-            if options.demo:
-                raise ValueError("The loopback demo does not use pairing.")
-            if not options.code and not public_url and (options.port == 0 or not local_listener):
-                raise ValueError("Use --code or provide the URL for the pairing link.")
-            token = DeviceStore(options.state_dir).issue()
-            scheme = "https" if options.tls_cert or options.self_signed else "http"
-            site = public_url or f"{scheme}://{address}:{options.port}"
-            print(token if options.code else f"{site}/#pair={token}")
-            return
-
-        if options.code:
-            raise ValueError("--code is used with the pair command.")
-        if (options.tunnel or options.demo) and not local_listener:
-            raise ValueError("--tunnel and --demo require a loopback listener.")
-        if options.demo and (options.direct_only or options.tunnel
+        if options.demo and not local_listener:
+            raise ValueError("--demo requires a loopback listener.")
+        if options.demo and (options.direct_only
                              or (public_url and not loopback(urlsplit(public_url).hostname))):
             raise ValueError("--demo is only for a standalone loopback session.")
         if options.tts_threads < 1:
@@ -466,7 +423,7 @@ def main():
             raise ValueError("A non-loopback listener requires a TLS certificate.")
 
         app = create_app(options.tts_threads, socket_path=options.pipiclaw_socket, state_dir=options.state_dir,
-                         demo_mode=options.demo, direct_only=options.direct_only, tunnel=options.tunnel)
+                         demo_mode=options.demo, direct_only=options.direct_only)
         config = uvicorn.Config(
             app, host=options.host, port=options.port, proxy_headers=False, access_log=False, workers=1,
             ssl_certfile=options.tls_cert, ssl_keyfile=options.tls_key,

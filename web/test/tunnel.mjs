@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { request } from 'node:http';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer as createHttpServer, request } from 'node:http';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,13 +26,21 @@ async function listen(server) {
   return server.address().port;
 }
 
-function pairingCode() {
-  return execFileSync('uv', ['run', '--no-sync', 'python', 'server.py', 'pair', '--code', '--state-dir', state], {
-    cwd, encoding: 'utf8',
-  }).trim();
+function pipiclawResponse(incoming, response) {
+  if (incoming.url === '/v1/responses') {
+    incoming.resume();
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.write('data: ' + JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: answer }) + '\n\n');
+    response.end('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [answer] } }) + '\n\n');
+  } else {
+    const body = incoming.url === '/v1/models/pipiclaw' ? { id: 'pipiclaw' }
+      : incoming.url === '/v1/conversations' ? { id: conversation }
+        : { data: [answer], has_more: false };
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+  }
 }
 
-let turnline, edge, pipiclaw, browser;
+let turnline, edge, pipiclaw, localPipiclaw, browser;
 try {
   const certPath = join(state, 'edge.pem');
   const keyPath = join(state, 'edge-key.pem');
@@ -59,22 +67,25 @@ try {
       cookie: incoming.headers.cookie, origin: incoming.headers.origin });
     if (incoming.headers.authorization !== 'Bearer ' + fixtureKey) {
       response.writeHead(401).end();
-    } else if (incoming.url === '/v1/responses') {
-      incoming.resume();
-      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      response.write('data: ' + JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: answer }) + '\n\n');
-      response.end('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [answer] } }) + '\n\n');
     } else {
-      const body = incoming.url === '/v1/models/pipiclaw' ? { id: 'pipiclaw' }
-        : incoming.url === '/v1/conversations' ? { id: conversation }
-          : { data: [answer], has_more: false };
-      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+      pipiclawResponse(incoming, response);
     }
   });
   const pipiclawUrl = 'https://127.0.0.1:' + await listen(pipiclaw);
 
-  turnline = spawn('uv', ['run', '--no-sync', 'python', 'server.py', '--port', '0', '--direct-only', '--tunnel',
-    '--state-dir', state], { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
+  const socketDirectory = join(state, 'state', 'webapi');
+  mkdirSync(socketDirectory, { recursive: true });
+  const socketRequests = [];
+  localPipiclaw = createHttpServer((incoming, response) => {
+    socketRequests.push({ path: incoming.url, authorization: incoming.headers.authorization });
+    pipiclawResponse(incoming, response);
+  });
+  localPipiclaw.listen(join(socketDirectory, 'api.sock'));
+  await once(localPipiclaw, 'listening');
+
+  turnline = spawn('uv', ['run', '--no-sync', 'python', 'server.py', '--port', '0', '--state-dir', state], {
+    cwd, env: { ...process.env, PIPICLAW_HOME: state }, stdio: ['ignore', 'pipe', 'inherit'],
+  });
   const backend = new URL(await new Promise((resolve, reject) => {
     turnline.once('error', reject);
     turnline.once('exit', code => reject(new Error('Turnline exited with ' + code)));
@@ -142,11 +153,12 @@ try {
   }
 
   await page.goto(first);
-  await waitFor('#backend-label', '等待配对');
+  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await page.getByRole('link', { name: '浏览器直连' }).click();
+  await waitFor('#backend-label', '等待设置');
   assert.equal(new URL(page.url()).pathname, '/direct');
   assert.equal(await page.evaluate(() => isSecureContext), true);
-  await page.getByRole('textbox', { name: '一次性配对码' }).fill(pairingCode());
-  await page.getByRole('button', { name: '配对', exact: true }).click();
   await page.getByRole('button', { name: '设置直连' }).click();
   await page.getByLabel('Pipiclaw 地址').fill(pipiclawUrl);
   await page.getByLabel('Pipiclaw Key', { exact: true }).fill(fixtureKey);
@@ -163,22 +175,37 @@ try {
   await waitFor('#backend-label', 'Pipiclaw 已连接');
   await waitFor('.entry.assistant .content', '这是浏览器直连的回复');
   assert.ok(!await page.evaluate(key => Object.values(localStorage).some(value => value.includes(key)), fixtureKey));
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await page.getByRole('link', { name: '服务端中转' }).click();
+  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  assert.equal(new URL(page.url()).pathname, '/');
 
-  await page.goto(second + '/#pair=' + pairingCode());
-  await waitFor('#backend-label', '等待设置');
-  assert.equal(new URL(page.url()).hash, '');
+  await page.goto(second);
+  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await page.getByRole('textbox', { name: '文字消息' }).fill('测试同机中转');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await waitFor('.entry.assistant .content', answer.content[0].text);
+  await page.reload();
+  await waitFor('.entry.assistant .content', answer.content[0].text);
+  const cookies = await page.context().cookies(second);
+  assert.ok(cookies.some(cookie => cookie.name === '__Host-turnline' && cookie.secure && cookie.httpOnly));
   assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/listen'));
   assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/synthesize'));
-  assert.ok(turnlineRequests.some(entry => entry.host === secondHost + ':' + port && entry.path === '/api/pair'));
-  assert.ok(turnlineRequests.every(entry => !entry.authorization && !entry.path.startsWith('/api/pipiclaw/')));
+  assert.ok(turnlineRequests.some(entry => entry.host === secondHost + ':' + port &&
+    entry.path === '/api/pipiclaw/v1/responses'));
+  assert.ok(turnlineRequests.every(entry => !entry.authorization &&
+    (entry.host !== firstHost + ':' + port || !entry.path.startsWith('/api/pipiclaw/'))));
+  assert.ok(socketRequests.some(entry => entry.path === '/v1/responses'));
+  assert.ok(socketRequests.every(entry => !entry.authorization));
   assert.ok(preflights > 0 && pipiclawRequests.some(entry => entry.path === '/v1/responses'));
   assert.ok(pipiclawRequests.every(entry =>
     entry.authorization === 'Bearer ' + fixtureKey && !entry.cookie && entry.origin === first));
-  console.log('Two HTTPS tunnel addresses, pairing, WSS, PCM, direct CORS/SSE, and credential isolation passed.');
+  console.log('Two HTTPS addresses, automatic socket relay, WSS, PCM, direct CORS/SSE, and history recovery passed.');
 } finally {
   await browser?.close();
   edge?.close();
   pipiclaw?.close();
+  localPipiclaw?.close();
   if (turnline && turnline.exitCode === null && turnline.signalCode === null) {
     turnline.kill();
     await once(turnline, 'exit');
