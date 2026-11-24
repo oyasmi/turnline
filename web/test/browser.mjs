@@ -184,6 +184,7 @@ try {
   await page.getByRole('button', { name: '通话设置' }).click();
   assert.equal(await page.locator('#speed').inputValue(), 'balanced');
   assert.equal(await page.locator('#reading').inputValue(), 'live');
+  assert.equal(await page.locator('#rate').inputValue(), '1');
   assert.equal(await page.locator('#duplex').isChecked(), false);
   await page.locator('#close-settings').click();
   const [plainRequest] = await Promise.all([

@@ -49,6 +49,25 @@ class SessionStoreTest(unittest.TestCase):
             self.assertEqual(store.start(token), token)
             self.assertEqual(store.identity(token), identity)
             self.assertTrue(store.owns(CONVERSATION, identity))
+            self.assertEqual(store.list_conversations(identity), {"data": [CONVERSATION], "has_more": False})
+
+    def test_history_paginates_only_the_current_device_without_repeating_new_entries(self):
+        with TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            first = store.identity(store.start(None))
+            second = store.identity(store.start(None))
+            ids = ["conv_" + format(index, "032x") for index in range(14)]
+            for conversation in ids:
+                store.own(conversation, first)
+            store.own(OTHER, second)
+            page = store.list_conversations(first)
+            self.assertEqual(page["data"], ids[:1:-1])
+            self.assertTrue(page["has_more"])
+            store.own(CONVERSATION, first)
+            self.assertEqual(store.list_conversations(first, page["data"][-1]),
+                             {"data": ids[1::-1], "has_more": False})
+            self.assertEqual(store.list_conversations(second), {"data": [OTHER], "has_more": False})
+            self.assertEqual(store.list_conversations(first, OTHER), {"data": [], "has_more": False})
 
     def test_public_url_requires_tls_for_a_nonloopback_browser(self):
         self.assertEqual(normalize_origin("https://192.168.1.5:443/"), "https://192.168.1.5")
@@ -133,6 +152,7 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                     async with running(app) as origin, httpx.AsyncClient(base_url=origin, timeout=5) as client:
                         headers = {"Origin": origin}
                         self.assertEqual((await client.post(PREFIX + "/conversations", headers=headers)).status_code, 401)
+                        self.assertEqual((await client.get(PREFIX + "/conversations")).status_code, 401)
                         self.assertEqual((await client.get("/speech/info")).status_code, 200)
                         rejected = await client.post(PREFIX + "/conversations", headers={"Origin": "https://other.test"})
                         self.assertEqual(rejected.status_code, 403)
@@ -143,9 +163,13 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("set-cookie", (await client.get("/api/session")).headers)
                         created = await client.post(PREFIX + "/conversations", headers=headers)
                         self.assertEqual(created.json()["id"], CONVERSATION)
+                        self.assertEqual((await client.get(PREFIX + "/conversations")).json(),
+                                         {"data": [CONVERSATION], "has_more": False})
                         self.assertEqual((await client.get(f"{PREFIX}/conversations/{CONVERSATION}/items")).status_code, 200)
                         async with httpx.AsyncClient(base_url=origin, timeout=5) as other:
                             self.assertEqual((await other.get("/api/session")).json()["connection"], "ready")
+                            self.assertEqual((await other.get(PREFIX + "/conversations")).json(),
+                                             {"data": [], "has_more": False})
                             self.assertEqual(
                                 (await other.get(f"{PREFIX}/conversations/{CONVERSATION}/items")).status_code, 404,
                             )

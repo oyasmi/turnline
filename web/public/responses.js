@@ -105,8 +105,22 @@ export async function createConversation(settings, signal) {
   return id;
 }
 
-export async function listConversationItems(settings, conversation, after, signal, order = 'asc') {
-  const query = new URLSearchParams({ order, limit: '50' });
+export function isConversationId(id) {
+  return typeof id === 'string' && /^conv_[a-f0-9]{32}$/.test(id);
+}
+
+export async function listConversationIds(settings, after, signal) {
+  const query = after ? '?' + new URLSearchParams({ after }) : '';
+  const response = await request(settings, '/conversations' + query, undefined, signal);
+  const page = await response.json();
+  if (!Array.isArray(page.data) || !page.data.every(isConversationId) || typeof page.has_more !== 'boolean') {
+    throw new Error('历史会话格式无效。');
+  }
+  return page;
+}
+
+export async function listConversationItems(settings, conversation, after, signal, order = 'asc', limit = 50) {
+  const query = new URLSearchParams({ order, limit });
   if (after) query.set('after', after);
   const response = await request(settings, '/conversations/' + encodeURIComponent(conversation) + '/items?' + query,
     undefined, signal);

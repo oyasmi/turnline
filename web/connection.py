@@ -21,6 +21,7 @@ from http_support import ClientStream, error, read_json
 SESSION_SECONDS = 365 * 24 * 3600
 RENEW_WINDOW = 30 * 24 * 3600
 CONVERSATION_ID = re.compile(r"conv_[a-f0-9]{32}")
+CONVERSATION_PAGE_SIZE = 12
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 UNAVAILABLE = "Turnline 无法连接 Pipiclaw，请检查服务端连接。"
 
@@ -79,6 +80,7 @@ class SessionStore:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE
                 );
+                CREATE INDEX IF NOT EXISTS conversations_by_device ON conversations (device);
             """)
 
     def open(self):
@@ -124,6 +126,18 @@ class SessionStore:
         with closing(self.open()) as db:
             return db.execute("SELECT 1 FROM conversations WHERE id = ? AND device = ?",
                               (conversation, device)).fetchone() is not None
+
+    def list_conversations(self, device, after=None):
+        with closing(self.open()) as db:
+            rows = db.execute("""
+                SELECT id FROM conversations
+                WHERE device = ? AND (
+                    ? IS NULL OR rowid < (SELECT rowid FROM conversations WHERE id = ? AND device = ?)
+                )
+                ORDER BY rowid DESC LIMIT ?
+            """, (device, after, after, device, CONVERSATION_PAGE_SIZE + 1)).fetchall()
+        return {"data": [row[0] for row in rows[:CONVERSATION_PAGE_SIZE]],
+                "has_more": len(rows) > CONVERSATION_PAGE_SIZE}
 
 
 def session_cookie(request):

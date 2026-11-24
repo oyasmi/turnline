@@ -48,6 +48,40 @@ test('keeps mixed-script model names and decimals intact across speech chunks', 
   assert.deepEqual(splitSpeech(prefix + model, true).phrases, [prefix, model]);
 });
 
+test('holds complete words and numbers across individual streamed deltas and preserves subtitle offsets', () => {
+  const cases = [
+    [true, '建议你现在运行', 'Ｋｕｂｅｒｎｅｔｅｓ'],
+    [false, '请'.repeat(60), 'Kubernetes'],
+    [false, '请'.repeat(62), 'résumé'],
+    [false, '请'.repeat(60), 'don’t'],
+    [false, '请'.repeat(61), 'v2.5.1'],
+    [false, '请'.repeat(61), '12:30'],
+  ];
+  for (const [opening, prefix, name] of cases) {
+    const source = prefix + name + '再继续。';
+    let rest = '';
+    let first = opening;
+    const spoken = [];
+    for (const delta of source) {
+      const input = rest + delta;
+      const { phrases, ranges, rest: remaining } = splitSpeech(input, false, first, true);
+      assert.deepEqual(ranges.map(({ start, end }) => input.slice(start, end)), phrases);
+      spoken.push(...phrases);
+      rest = remaining;
+      if (phrases.length) first = false;
+    }
+    spoken.push(...splitSpeech(rest, true, first).phrases);
+    assert.deepEqual(spoken, [prefix, name + '再继续。']);
+  }
+});
+
+test('does not use a colon in a streamed clock time as a speaking pause', () => {
+  const beginning = '请确认现在的开始时间是１２：';
+  assert.deepEqual(splitSpeech(beginning, false, true), { phrases: [], rest: beginning });
+  const complete = beginning + '３０。下一步';
+  assert.deepEqual(splitSpeech(complete, false, true).phrases, ['请确认现在的开始时间是１２：３０。']);
+});
+
 test('listens through thinking, monitors a whole spoken reply and drains only when idle', () => {
   let state = initialCallState;
   const events = [

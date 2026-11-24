@@ -280,6 +280,10 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
         return response
 
     if pipiclaw:
+        @app.get("/api/pipiclaw/v1/conversations")
+        async def list_conversations(after: str | None = None, identity=Depends(require_session)):
+            return await asyncio.to_thread(pipiclaw.sessions.list_conversations, identity, after)
+
         @app.post("/api/pipiclaw/v1/conversations")
         async def create_conversation(identity=Depends(require_session)):
             return await pipiclaw.create_conversation(identity)

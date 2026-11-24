@@ -45,7 +45,7 @@ export function preferences() {
   return {
     reading: saved?.reading === 'confirmed' ? 'confirmed' : 'live',
     speed: RESPONSE_SPEEDS.includes(saved?.speed) ? saved.speed : migratedSpeed ?? 'balanced',
-    rate: SPEECH_RATES.includes(saved?.rate) ? saved.rate : 1.07,
+    rate: SPEECH_RATES.includes(saved?.rate) ? saved.rate : 1,
     tones: saved?.tones !== false,
     waitingTone: saved?.waitingTone !== false,
     inputMode: saved?.inputMode === 'hold' ? 'hold' : 'auto',

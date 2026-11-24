@@ -8,8 +8,9 @@ import { announce, clearCaption, renderCall, setIcon, showDraft, showLevel, show
 import { bindShortcuts, updateMediaSession, vibrate } from './call-controls.js';
 import { ResponseTurn } from './response-turn.js';
 import { WaitingFeedback } from './waiting.js';
+import { bindConversationHistory, conversationText, rememberConversation } from './conversation-history.js';
 import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
-import { checkDirectConnection, createConversation, isBackchannel, listConversationItems, normalizeDirectUrl,
+import { checkDirectConnection, createConversation, isBackchannel, isConversationId, listConversationItems, normalizeDirectUrl,
   openResponse } from './responses.js';
 import { splitSpeech } from './chunker.js';
 import { directSettings, preferences, saveDirectSettings, savePreferences, store, stored } from './settings.js';
@@ -146,6 +147,7 @@ function renderConnection() {
   $('switch-mode').hidden = !relayAvailable;
   $('switch-mode').href = directMode ? '/' : '/direct';
   $('switch-mode').textContent = directMode ? '服务端中转' : '浏览器直连';
+  $('open-conversations').hidden = connection !== 'ready' || settings.context !== 'conversation';
   render();
 }
 
@@ -156,27 +158,46 @@ function watchConversation(id, cursor) {
   updates = new ConversationUpdates(settings, id, () => !turn || turn.ended, showConversationUpdate, cursor);
 }
 
+function showRestoredConversation(id, page) {
+  conversation = id;
+  store(conversationKey(), id);
+  rememberConversation(settings, id);
+  let lastAnswer;
+  for (const item of page.data.slice().reverse()) {
+    if (item?.type !== 'message' || item.status !== 'completed') continue;
+    const text = conversationText(item);
+    if (text && (item.role === 'user' || item.phase === 'final_answer')) {
+      const time = item.created_at == null ? null : new Date(typeof item.created_at === 'number' ? item.created_at * 1000 : item.created_at);
+      const row = transcript.add(item.role === 'user' ? 'user' : 'assistant', text, time);
+      lastAnswer = item.role === 'assistant' ? row : undefined;
+    }
+  }
+  transcript.retryFor(lastAnswer);
+  watchConversation(id, page.data.find(item => item?.id && item.status !== 'in_progress')?.id);
+}
+
 async function restoreConversation(generation) {
   const key = conversationKey();
   const id = stored(key);
-  if (!/^conv_[a-f0-9]{32}$/.test(id ?? '') || conversation) return;
+  if (!isConversationId(id) || conversation) return;
   try {
     const page = await listConversationItems(settings, id, undefined, AbortSignal.timeout(5_000), 'desc');
-    if (generation !== connectionGeneration || conversation || opening) return;
-    conversation = id;
-    for (const item of page.data.slice().reverse()) {
-      if (item.type !== 'message' || item.status !== 'completed') continue;
-      const text = item.content.map(part => part.text).filter(Boolean).join('\n');
-      if (text && (item.role === 'user' || item.phase === 'final_answer')) {
-        const time = item.created_at == null ? null : new Date(typeof item.created_at === 'number' ? item.created_at * 1000 : item.created_at);
-        const row = transcript.add(item.role === 'user' ? 'user' : 'assistant', text, time);
-        transcript.retryFor(item.role === 'assistant' ? row : undefined);
-      }
-    }
-    watchConversation(id, page.data[0]?.id);
+    if (generation !== connectionGeneration || conversation || opening || stored(key) !== id) return;
+    showRestoredConversation(id, page);
   } catch (error) {
-    if (generation === connectionGeneration && !conversation && error.status === 404) store(key);
+    if (generation === connectionGeneration && !conversation && stored(key) === id && error.status === 404) store(key);
   }
+}
+
+async function selectConversation(id, signal) {
+  const generation = connectionGeneration;
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(5_000)]);
+  const page = await listConversationItems(settings, id, undefined, deadline, 'desc');
+  if (signal.aborted) return;
+  if (deadline.aborted) throw new Error('打开会话超时，请重试。');
+  if (generation !== connectionGeneration) throw new Error('连接已变更，请重新打开历史会话。');
+  newSession({ forget: false });
+  showRestoredConversation(id, page);
 }
 
 function conversationKey() {
@@ -240,6 +261,7 @@ function ensureConversation() {
     if (opening !== attempt) throw new DOMException('Conversation changed', 'AbortError');
     conversation = id;
     store(key, id);
+    rememberConversation(settings, id);
     watchConversation(id);
     return id;
   }).finally(() => {
@@ -841,13 +863,18 @@ async function send(text, timing, display, quiet = false) {
 function newSession({ forget = true } = {}) {
   opening?.controller.abort();
   opening = undefined;
-  if (forget) store(conversationKey());
+  if (forget) {
+    const key = conversationKey();
+    rememberConversation(settings, stored(key));
+    store(key);
+  }
   updates?.stop();
   updates = undefined;
   pendingUpdates = [];
   voiceQueue = [];
   previousCommit = previousOutput = undefined;
   expectingAnswer = false;
+  held = releasing = false;
   configureVoice();
   clearInput();
   interrupt(false, 'new_conversation');
@@ -858,6 +885,8 @@ function newSession({ forget = true } = {}) {
   for (const name of Object.keys(metrics)) showMetric(name);
   showError();
 }
+
+bindConversationHistory({ settings: () => settings, current: () => conversation, select: selectConversation });
 
 function openSettings() {
   $('instructions').value = settings.instructions;

@@ -7,14 +7,26 @@ from kaldifst import TextNormalizer
 from piper_phonemize import phonemize_espeak
 from pypinyin import Style, lazy_pinyin
 
-CHINESE_RUN = re.compile(r"([㐀-鿿𠀀-𱍏]+)")
+HAN = "㐀-鿿𠀀-𱍏"
+CHINESE_RUN = re.compile(rf"[{HAN}]+")
 CODE = re.compile(r"[A-Za-z0-9]+(?:[._\-‐‑–][A-Za-z0-9]+)*")
 CODE_PART = re.compile(r"[A-Za-z]+|[0-9]+(?:\.[0-9]+)*")
 DIGITS = "zero one two three four five six seven eight nine".split()
-PUNCTUATION = dict(zip("，。！？；：、", ",.!?;:,"))
-LANGUAGE_SPANS = re.compile(r"([㐀-鿿𠀀-𱍏]+|[，。！？；：、])")
+PUNCTUATION = dict(zip("，。！？；、", ",.!?;,"))
+LANGUAGE_SPANS = re.compile(rf"([{HAN}]+|[，。！？；、])")
+SCRIPT_BOUNDARY = re.compile(rf"(?<=[{HAN}])(?=[A-Za-z])|(?<=[A-Za-z])(?=[{HAN}])")
 FULLWIDTH_CODE = re.compile(r"[Ａ-Ｚａ-ｚ０-９]+")
-LEADING_PUNCTUATION = re.compile(r"^[\s,.!?;:]+")
+COLON_PAUSE = re.compile(r"(?<![0-9]):|:(?![0-9])")
+CLOCK_TIME = re.compile(r"(?<![0-9:])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9:])")
+LEADING_PUNCTUATION = re.compile(r"^[\s,.!?;]+")
+# The bilingual Matcha model uses these English phones in its training input.
+# Follow the model's Sherpa-ONNX frontend (k2-fsa/sherpa-onnx#2853).
+MATCHA_ENGLISH_PHONES = {
+    "eɪ": "A", "aɪ": "I", "ɔɪ": "Y", "oʊ": "O", "əʊ": "O", "aʊ": "W",
+    "tʃ": "ʧ", "dʒ": "ʤ",
+    "ɝ": "ɜɹ", "ɚ": "əɹ", "ː": "", "g": "ɡ", "r": "ɹ", "e": "ɛ",
+}
+ESPEAK_PHONES = re.compile("|".join(MATCHA_ENGLISH_PHONES))
 
 
 def speech_text(text):
@@ -25,7 +37,7 @@ def speech_text(text):
         ("太字节", "吉字节", "兆字节", "千字节") if chinese else
         (" terabytes", " gigabytes", " megabytes", " kilobytes"),
     ))
-    text = re.sub(r"```[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\)|https?://[^\s，。！？]+", "", text)
+    text = re.sub(r"```[\s\S]*?(?:```|$)|!\[[^\]]*\]\([^)]+\)|https?://[^\s，。！？]+", " ", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"^[ \t]*(?:#+|>|[-*+]\s|\d+\.\s)", "", text, flags=re.M)
     text = re.sub(r"([+-]?\d+(?:\.\d+)?)\s*[%％]", r"百分之\1" if chinese else r"\1 percent", text)
@@ -33,7 +45,10 @@ def speech_text(text):
                   lambda match: match[1] + units[match[2].upper()], text, flags=re.I)
     text = re.sub(r"~/\.([a-z][a-z\d-]*)(?![\w/-])",
                   r"家目录的点 \1" if chinese else r"home directory dot \1", text, flags=re.I)
-    return re.sub(r"[`*#~_《》]", "", text).strip()
+    text = re.sub(r"(?<![A-Za-z0-9])C#(?![A-Za-z0-9#])", "C sharp", text)
+    text = re.sub(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])", " ", text)
+    text = re.sub(r'(?<=[A-Za-z0-9])["“”]+(?=[A-Za-z0-9])', " ", text)
+    return re.sub(r'[`*#~_《》"“”]', "", text).strip()
 
 
 def expand_model_code(match):
@@ -66,10 +81,14 @@ class MatchaFrontend:
 
     def tokens(self, text):
         text = FULLWIDTH_CODE.sub(lambda match: normalize("NFKC", match[0]), normalize("NFC", text))
+        # A literal colon can become an extra syllable in Matcha.
+        text = COLON_PAUSE.sub("，", text.replace("：", ":"))
         text = CODE.sub(expand_model_code, text)
         if CHINESE_RUN.search(text):
+            text = CLOCK_TIME.sub(r"\1点\2分", text)
             for normalizer in self.normalizers:
                 text = normalizer.normalize(text)
+            text = SCRIPT_BOUNDARY.sub(" ", text)
 
         tokens = []
         for span in LANGUAGE_SPANS.split(text):
@@ -84,8 +103,9 @@ class MatchaFrontend:
                 if prefix:
                     tokens.extend(" " if char.isspace() else char for char in prefix[0])
                     span = span[prefix.end():]
-                for clause in phonemize_espeak(span.strip(), "en-us"):
-                    tokens.extend(clause)
+                clauses = phonemize_espeak(span.strip(), "en-us")
+                phones = " ".join("".join(clause) for clause in clauses)
+                tokens.extend(ESPEAK_PHONES.sub(lambda match: MATCHA_ENGLISH_PHONES[match[0]], phones))
                 if span[-1].isspace():
                     tokens.append(" ")
             else:
@@ -95,6 +115,8 @@ class MatchaFrontend:
         # text normalizer and the phonemizer's clause breaks.
         result = []
         for token in tokens:
+            if token == ":":
+                token = ","
             if token in self.symbols and (token != " " or (result and result[-1] != " ")):
                 result.append(token)
         if result and result[-1] == " ":

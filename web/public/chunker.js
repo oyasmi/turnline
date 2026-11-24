@@ -1,4 +1,19 @@
 const hiddenSpeech = /`{3}[\s\S]*?(?:`{3}|$)|!\[[^\]\n]*\]\([^)]*(?:\)|$)|(?<=\])\([^)]*(?:\)|$)|https?:\/\/[^\s，。！？]+/gu;
+const wordCharacter = String.raw`[\p{Script=Latin}\p{M}\p{Nd}]`;
+const wordJoiner = "[.'’_．＿‐‑–－-]";
+const word = `${wordCharacter}+(?:${wordJoiner}${wordCharacter}+)*`;
+const number = String.raw`\p{Nd}+(?:[.,．:：]\p{Nd}+)*(?:[ \t]*(?:[%％]|[KMGTＫＭＧＴ][BＢ]))?`;
+const speechWord = `${number}(?!${wordCharacter}|${wordJoiner}${wordCharacter})|${word}`;
+const openingWords = new RegExp(String.raw`\p{Script=Han}|${speechWord}|[\p{L}\p{N}]`, 'gu');
+const speechWords = new RegExp(speechWord, 'gu');
+const unfinishedWord = new RegExp(`^${wordJoiner}?$`, 'u');
+const wordEnding = new RegExp(`${wordCharacter}$`, 'u');
+const numberEnding = /\p{Nd}$/u;
+
+function pendingWord(word, gap) {
+  return wordEnding.test(word) && unfinishedWord.test(gap) ||
+    numberEnding.test(word) && /^[:：]$/u.test(gap);
+}
 
 function visibleSpeech(text) {
   return text.replace(hiddenSpeech, match => ' '.repeat(match.length))
@@ -7,8 +22,7 @@ function visibleSpeech(text) {
 
 function openingEnd(text) {
   const visible = visibleSpeech(text);
-  const tokens = /\p{Script=Han}|[A-Za-z][A-Za-z0-9]*(?:[.'’_-][A-Za-z0-9]+)*|\d+(?:[.,]\d+)*(?:[ \t]*(?:[%％]|[KMGT]B\b))?|[\p{L}\p{N}]/gu;
-  const words = [...visible.matchAll(tokens)];
+  const words = [...visible.matchAll(openingWords)];
   let characters = 0;
   let han = 0;
   let latin = 0;
@@ -17,24 +31,38 @@ function openingEnd(text) {
     const end = match.index + match[0].length;
     characters += (match[0].match(/[\p{L}\p{N}]/gu) ?? []).length;
     if (/\p{Script=Han}/u.test(match[0])) han++;
-    else if (/^[A-Za-z]/u.test(match[0])) latin++;
+    else if (/^\p{Script=Latin}/u.test(match[0])) latin++;
     const gap = visible.slice(end, words[index + 1]?.index ?? visible.length);
     const complete = /[。！？!?；;]|\.(?=\s)/u.exec(gap);
     if (complete && words[index + 1]) return end + complete.index + complete[0].length;
     if (han >= 6 || latin >= 3) {
-      const pause = /[。！？!?；;\n，、：]+|,(?!\d)|\.(?=\s|$)/u.exec(gap);
-      if (pause && !(pause[0] === '.' && /\d$/.test(match[0]) && !gap.slice(pause.index + 1))) {
+      const pause = /[。！？!?；;\n，、：:]+|,(?!\d)|\.(?=\s|$)/u.exec(gap);
+      if (pause && !(numberEnding.test(match[0]) && pendingWord(match[0], gap))) {
         return end + pause.index + pause[0].length;
       }
     }
     if (characters >= 14) {
       // A final Latin token, number, or dangling decimal can still grow in a later delta.
-      if (/^[.'’_-]?$/u.test(gap) && /[A-Za-z0-9]$/u.test(match[0])) return previousEnd;
+      if (pendingWord(match[0], gap)) return previousEnd;
       return end;
     }
     if (han >= 6 || latin >= 3) previousEnd = end;
   }
   return 0;
+}
+
+function softSpeechEnd(text, start, end, flush) {
+  for (const match of text.matchAll(speechWords)) {
+    if (match.index >= end) break;
+    const wordEnd = match.index + match[0].length;
+    const pending = !flush && pendingWord(match[0], text.slice(wordEnd));
+    if (end >= wordEnd && !pending) continue;
+    if (match.index > start) return match.index;
+    if (!pending && wordEnd - start <= 128) return wordEnd;
+    // A single long identifier must still fit in a synthesis request.
+    return pending && text.length - start < 128 ? 0 : start + 128;
+  }
+  return end;
 }
 
 function appendSpeech(phrases, ranges, source, offset) {
@@ -90,11 +118,7 @@ export function splitSpeech(text, flush = false, opening = false, mapped = false
       const start = visible.length - visible.trimStart().length;
       const soft = Math.max(visible.lastIndexOf('，', start + 63), visible.lastIndexOf('、', start + 63),
         visible.lastIndexOf(' ', start + 63));
-      end = soft >= start + 24 ? soft + 1 : start + 64;
-      if (end === start + 64 && /[A-Za-z0-9._-]/u.test(visible[end] ?? '')) {
-        const name = /[A-Za-z0-9]+(?:['’._-][A-Za-z0-9]+)*['’._-]?$/u.exec(visible.slice(start, end));
-        if (name && name.index >= 24) end = start + name.index;
-      }
+      end = softSpeechEnd(visible, start, soft >= start + 24 ? soft + 1 : start + 64, flush);
     }
     const fence = rest.indexOf('```');
     if (fence >= 0 && (!end || fence < end)) {

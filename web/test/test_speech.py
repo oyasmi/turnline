@@ -29,12 +29,12 @@ class BilingualSpeechTest(unittest.TestCase):
     def test_mixed_sentence_preserves_context_and_punctuation(self):
         tokens = self.frontend.tokens
         mixed = tokens("国内：MiniMax 发布 H3 Family，包含 H3-Highspeed、H3-Lite。")
-        self.assertEqual(mixed[:3], ["guo2", "nei4", ":"])
+        self.assertEqual(mixed[:3], ["guo2", "nei4", ","])
         for phrase in ("MiniMax", "H3 Family", "H3-Highspeed", "H3-Lite"):
             english = tokens(phrase)
             self.assertTrue(english)
             self.assertIn(" ".join(english), " ".join(mixed))
-        self.assertEqual(mixed.count(","), 2)
+        self.assertEqual(mixed.count(","), 3)
         self.assertEqual(mixed[-1], ".")
 
     def test_new_names_use_word_pronunciation_and_versions_are_general(self):
@@ -46,6 +46,13 @@ class BilingualSpeechTest(unittest.TestCase):
         self.assertEqual(tokens("Ｖ４.２"), tokens("V four point two"))
         self.assertEqual(tokens("X7-Pro"), tokens("X seven Pro"))
 
+    def test_english_uses_matcha_phone_symbols_and_keeps_language_boundaries(self):
+        tokens = self.frontend.tokens
+        self.assertEqual(tokens("Python"), ["p", "ˈ", "I", "θ", "ə", "n"])
+        self.assertEqual(tokens("change"), ["ʧ", "ˈ", "A", "n", "ʤ"])
+        self.assertEqual(tokens("用Python写"), ["yong4", " ", *tokens("Python"), " ", "xie3"])
+        self.assertEqual(tokens("用Ｐｙｔｈｏｎ写"), tokens("用 Python 写"))
+
     def test_preserves_chinese_number_rules_and_contextual_pinyin(self):
         tokens = self.frontend.tokens
         self.assertEqual(tokens("下载量超过1.48亿次"), tokens("下载量超过一点四八亿次"))
@@ -53,13 +60,30 @@ class BilingualSpeechTest(unittest.TestCase):
         self.assertEqual(tokens("重庆银行行长"), ["chong2", "qing4", "yin2", "hang2", "hang2", "zhang3"])
 
 
+    def test_colons_keep_pauses_and_clock_times(self):
+        tokens = self.frontend.tokens
+        self.assertEqual(tokens("提示：请勿关闭浏览器。"), tokens("提示，请勿关闭浏览器。"))
+        self.assertEqual(tokens("Python:ready"), tokens("Python，ready"))
+        self.assertEqual(tokens("请在12:30开始。"), tokens("请在十二点三十分开始。"))
+        self.assertEqual(tokens("请在１２：３０开始。"), tokens("请在十二点三十分开始。"))
+        self.assertEqual(tokens("Start at 12:30."), tokens("Start at twelve thirty."))
+
+    def test_double_quotes_leave_only_the_quoted_words(self):
+        tokens = self.frontend.tokens
+        text = speech_text('请念“你好”，再说"再见"。')
+        self.assertEqual(tokens(text), tokens("请念你好，再说再见。"))
+        self.assertEqual(speech_text('Say“hello”world.'), "Say hello world.")
+        self.assertEqual(speech_text('Say “don’t”.'), "Say don’t.")
+
     def test_shared_speech_normalizer_expands_percentages_units_and_paths(self):
         self.assertEqual(speech_text("《红楼梦》。占用 37%，\x60~/.cache\x60 约 6.5GB。"),
                          "红楼梦。占用 百分之37，家目录的点 cache 约 6.5吉字节。")
         self.assertEqual(speech_text("Disk is at 37%. Cache takes 6.5GB."),
                          "Disk is at 37 percent. Cache takes 6.5 gigabytes.")
+        self.assertEqual(speech_text("请用C#调用 `get_user`，查看 **README**。"),
+                         "请用C sharp调用 get user，查看 README。")
 
-    def test_matcha_to_sensevoice_preserves_percentage_and_capacity(self):
+    def recognize_synthesis(self, text):
         if not (MODELS / SENSE_VOICE / "model.int8.onnx").is_file():
             self.skipTest("Run setup_models.py to install SenseVoice.")
         models = SpeechModels()
@@ -71,20 +95,28 @@ class BilingualSpeechTest(unittest.TestCase):
             audio = np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
             heard.append(models.recognize(audio))
 
-        models.synthesize("磁盘已经使用37%，还剩6.5GB。", 0, Event(), read_back)
+        models.synthesize(text, 0, Event(), read_back)
         self.assertEqual(len(heard), 1)
-        self.assertIn("37%", heard[0])
-        self.assertIn("6.5", heard[0])
-        self.assertIn("字节", heard[0])
+        return heard[0]
+
+    def test_matcha_to_sensevoice_preserves_percentage_and_capacity(self):
+        heard = self.recognize_synthesis("磁盘已经使用37%，还剩6.5GB。")
+        for word in ("37%", "6.5", "字节"):
+            self.assertIn(word, heard)
+
+    def test_matcha_to_sensevoice_recognizes_english_in_mixed_speech(self):
+        heard = self.recognize_synthesis("请用 Python 写代码，然后部署 Kubernetes。").lower()
+        self.assertIn("python", heard)
+        self.assertRegex(heard, r"ku+bernetes")
 
 
 class AudioShapingTest(unittest.TestCase):
     def test_trims_edges_and_adds_pause_for_punctuation(self):
         rate = 16_000
         audio = np.pad(np.full(1600, 0.25, dtype="<f4"), (2560, 1728))
-        for text, pause in (("继续，", 0.12), ("结束。", 0.26), ("换一段。\n\n", 0.4)):
+        for text, pause in (("继续，", 0.12), ("提示：", 0.12), ("“结束！”", 0.26), ("换一段。\n\n", 0.4)):
             with self.subTest(text=text):
-                shaped = shape_audio(audio, rate, text, text.strip())
+                shaped = shape_audio(audio, rate, text, speech_text(text))
                 first = np.flatnonzero(np.abs(shaped) >= AUDIBLE_THRESHOLD)[0]
                 self.assertEqual(first, 320)
                 self.assertEqual(len(shaped), 320 + 1600 + round(rate * pause))

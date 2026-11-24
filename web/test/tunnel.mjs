@@ -14,7 +14,6 @@ const state = mkdtempSync(join(tmpdir(), 'turnline-tunnel-'));
 const firstHost = 'first.turnline.test';
 const secondHost = 'second.turnline.test';
 const fixtureKey = 'pk_fixture_only';
-const conversation = 'conv_' + 'c'.repeat(32);
 const answer = {
   id: 'assistant_1', type: 'message', role: 'assistant', phase: 'final_answer', status: 'completed',
   content: [{ type: 'output_text', text: '这是浏览器直连的回复。' }],
@@ -26,20 +25,50 @@ async function listen(server) {
   return server.address().port;
 }
 
-function pipiclawResponse(incoming, response) {
-  if (incoming.url === '/v1/responses') {
-    incoming.resume();
+function pipiclawFixture() {
+  const conversations = new Map();
+  const requests = [];
+  const json = (response, body, status = 200) => {
+    response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+  };
+  async function respond(incoming, response) {
+    const url = new URL(incoming.url, 'http://localhost');
+    if (url.pathname === '/v1/models/pipiclaw') return json(response, { id: 'pipiclaw' });
+    if (url.pathname === '/v1/conversations' && incoming.method === 'POST') {
+      incoming.resume();
+      const id = 'conv_' + (conversations.size + 1).toString(16).padStart(32, '0');
+      conversations.set(id, []);
+      return json(response, { id });
+    }
+    if (url.pathname.endsWith('/items')) {
+      const items = conversations.get(url.pathname.split('/')[3]);
+      if (!items) return json(response, { error: { message: 'Unknown conversation' } }, 404);
+      const ordered = url.searchParams.get('order') === 'desc' ? items.slice().reverse() : items;
+      const after = url.searchParams.get('after');
+      const limit = Number(url.searchParams.get('limit') ?? 50);
+      const remaining = after ? ordered.slice(ordered.findIndex(item => item.id === after) + 1) : ordered;
+      return json(response, { data: remaining.slice(0, limit), has_more: remaining.length > limit });
+    }
+    if (url.pathname !== '/v1/responses') return json(response, {}, 404);
+    let body = '';
+    for await (const chunk of incoming) body += chunk;
+    const request = JSON.parse(body);
+    const items = conversations.get(request.conversation);
+    if (!items) return json(response, { error: { message: 'Unknown conversation' } }, 404);
+    requests.push(request);
+    const input = { id: 'user_' + requests.length, type: 'message', role: 'user', status: 'completed',
+      content: [{ type: 'input_text', text: request.input }] };
+    const reply = { ...answer, id: 'assistant_' + requests.length };
+    items.push(input, reply);
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    response.write('data: ' + JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: answer }) + '\n\n');
-    response.end('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [answer] } }) + '\n\n');
-  } else {
-    const body = incoming.url === '/v1/models/pipiclaw' ? { id: 'pipiclaw' }
-      : incoming.url === '/v1/conversations' ? { id: conversation }
-        : { data: [answer], has_more: false };
-    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+    response.write('data: ' + JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: reply }) + '\n\n');
+    response.end('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [reply] } }) + '\n\n');
   }
+  return { respond, requests };
 }
 
+const directFixture = pipiclawFixture();
+const relayFixture = pipiclawFixture();
 let turnline, edge, pipiclaw, localPipiclaw, browser;
 try {
   const certPath = join(state, 'edge.pem');
@@ -63,12 +92,12 @@ try {
       }).end();
       return;
     }
-    pipiclawRequests.push({ path: incoming.url, authorization: incoming.headers.authorization,
+    pipiclawRequests.push({ path: incoming.url, method: incoming.method, authorization: incoming.headers.authorization,
       cookie: incoming.headers.cookie, origin: incoming.headers.origin });
     if (incoming.headers.authorization !== 'Bearer ' + fixtureKey) {
       response.writeHead(401).end();
     } else {
-      pipiclawResponse(incoming, response);
+      void directFixture.respond(incoming, response);
     }
   });
   const pipiclawUrl = 'https://127.0.0.1:' + await listen(pipiclaw);
@@ -78,7 +107,7 @@ try {
   const socketRequests = [];
   localPipiclaw = createHttpServer((incoming, response) => {
     socketRequests.push({ path: incoming.url, authorization: incoming.headers.authorization });
-    pipiclawResponse(incoming, response);
+    void relayFixture.respond(incoming, response);
   });
   localPipiclaw.listen(join(socketDirectory, 'api.sock'));
   await once(localPipiclaw, 'listening');
@@ -152,6 +181,37 @@ try {
     }
   }
 
+  async function sendText(text) {
+    await page.getByRole('textbox', { name: '文字消息' }).fill(text);
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await waitFor('.entry.assistant:last-child .content', answer.content[0].text);
+  }
+
+  async function switchConversation(title) {
+    await page.getByRole('button', { name: '历史会话' }).click();
+    const picker = page.getByRole('dialog', { name: '历史会话' });
+    await picker.getByRole('button', { name: title, exact: true }).click();
+    await picker.waitFor({ state: 'hidden' });
+    await waitFor('.entry.user .content', title);
+  }
+
+  async function verifyHistory(fixture, firstTitle, secondTitle) {
+    const firstId = fixture.requests[0].conversation;
+    await page.getByRole('button', { name: '新对话' }).click();
+    await page.reload();
+    await page.locator('#empty').waitFor({ state: 'visible' });
+    await sendText(secondTitle);
+    assert.notEqual(fixture.requests[1].conversation, firstId);
+    await switchConversation(firstTitle);
+    assert.equal(await page.locator('.entry.user').count(), 1);
+    await sendText('继续之前的对话');
+    assert.equal(fixture.requests[2].conversation, firstId);
+    await page.reload();
+    await waitFor('.entry.user:nth-last-child(2) .content', '继续之前的对话');
+    await switchConversation(secondTitle);
+    assert.equal(await page.locator('.entry.user').count(), 1);
+  }
+
   await page.goto(first);
   await waitFor('#backend-label', 'Pipiclaw 已连接');
   await page.getByRole('button', { name: '通话设置' }).click();
@@ -174,6 +234,9 @@ try {
   await page.reload();
   await waitFor('#backend-label', 'Pipiclaw 已连接');
   await waitFor('.entry.assistant .content', '这是浏览器直连的回复');
+  await page.setViewportSize({ width: 360, height: 640 });
+  await verifyHistory(directFixture, '测试浏览器直连', '另一条浏览器直连会话');
+  assert.ok(!pipiclawRequests.some(entry => entry.method === 'GET' && /^\/v1\/conversations(?:\?|$)/.test(entry.path)));
   assert.ok(!await page.evaluate(key => Object.values(localStorage).some(value => value.includes(key)), fixtureKey));
   await page.getByRole('button', { name: '通话设置' }).click();
   await page.getByRole('link', { name: '服务端中转' }).click();
@@ -182,11 +245,8 @@ try {
 
   await page.goto(second);
   await waitFor('#backend-label', 'Pipiclaw 已连接');
-  await page.getByRole('textbox', { name: '文字消息' }).fill('测试同机中转');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
-  await waitFor('.entry.assistant .content', answer.content[0].text);
-  await page.reload();
-  await waitFor('.entry.assistant .content', answer.content[0].text);
+  await sendText('测试同机中转');
+  await verifyHistory(relayFixture, '测试同机中转', '另一条同机中转会话');
   const cookies = await page.context().cookies(second);
   assert.ok(cookies.some(cookie => cookie.name === '__Host-turnline' && cookie.secure && cookie.httpOnly));
   assert.ok(turnlineRequests.some(entry => entry.host === firstHost + ':' + port && entry.path === '/speech/voice'));
@@ -199,7 +259,7 @@ try {
   assert.ok(preflights > 0 && pipiclawRequests.some(entry => entry.path === '/v1/responses'));
   assert.ok(pipiclawRequests.every(entry =>
     entry.authorization === 'Bearer ' + fixtureKey && !entry.cookie && entry.origin === first));
-  console.log('Two HTTPS addresses, automatic socket relay, WSS, PCM, direct CORS/SSE, and history recovery passed.');
+  console.log('HTTPS, WSS, PCM, direct CORS/SSE, and conversation switching in both connection modes passed.');
 } finally {
   await browser?.close();
   edge?.close();

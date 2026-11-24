@@ -86,6 +86,7 @@
             <button id="expand-transcript" type="button" aria-controls="messages" class="button icon-button" aria-label="展开对话记录" title="展开对话记录" aria-expanded="false">
               <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#expand"/></svg>
             </button>
+            <button id="open-conversations" type="button" class="button ghost" aria-label="历史会话" aria-haspopup="dialog" hidden>历史</button>
             <button id="new-session" type="button" class="button ghost"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#plus"/></svg>新对话</button>
           </div>
         </header>
@@ -109,6 +110,18 @@
       </section>
     </div>
   </main>
+
+  <dialog id="conversation-history" aria-labelledby="conversation-history-title">
+    <div class="conversation-history-content">
+      <header class="panel-heading">
+        <h2 id="conversation-history-title">历史会话</h2>
+        <button id="close-conversations" type="button" class="button subtle">关闭</button>
+      </header>
+      <p id="conversation-status" role="status"></p>
+      <ul id="conversation-list" class="conversation-list"></ul>
+      <button id="more-conversations" type="button" class="button ghost" hidden>加载更多</button>
+    </div>
+  </dialog>
 
   <dialog id="diagnostics" aria-labelledby="diagnostics-title">
     <div class="diagnostics-content">
@@ -170,8 +183,8 @@
         <label>播报语速
           <select id="rate">
             <option value="0.9">0.9×</option>
-            <option value="1">1.0×</option>
-            <option value="1.07" selected>1.07×</option>
+            <option value="1" selected>1.0×</option>
+            <option value="1.07">1.07×</option>
             <option value="1.15">1.15×</option>
           </select>
         </label>

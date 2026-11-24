@@ -80,9 +80,8 @@ class SpeechModels:
         self.recognize(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
 
     def warm_synthesis(self):
-        self.synthesize("你好，hello。", 0, Event(), lambda *_: True)
-        for text in self.common_phrases:
-            self.cached_phrase(text, 1.07)
+        for text in ("你好，hello。", *self.common_phrases):
+            self.synthesize(text, 0, Event(), lambda *_: True)
 
     def recognize(self, samples):
         with self.recognition_lock:
@@ -114,7 +113,7 @@ class SpeechModels:
         pcm = shape_audio(pcm, voice.sample_rate, text, normalized)
         return pcm.tobytes(), voice.sample_rate
 
-    def synthesize(self, text, speaker, cancelled, publish, speed=1.07):
+    def synthesize(self, text, speaker, cancelled, publish, speed=1.0):
         with self.synthesis_lock:
             if cancelled.is_set():
                 return
