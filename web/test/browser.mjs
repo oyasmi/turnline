@@ -56,11 +56,12 @@ try {
         samples: new Float32Array(await response.arrayBuffer()),
       });
     };
-    window.speakTestUtterance = async (text = basic) => {
+    window.speakTestUtterance = async (text = basic, seconds = Infinity) => {
       const fixture = fixtures.get(text);
       await fixtureContext.resume();
-      const buffer = fixtureContext.createBuffer(1, fixture.samples.length, fixture.sampleRate);
-      buffer.copyToChannel(fixture.samples, 0);
+      const samples = fixture.samples.subarray(0, seconds * fixture.sampleRate);
+      const buffer = fixtureContext.createBuffer(1, samples.length, fixture.sampleRate);
+      buffer.copyToChannel(samples, 0);
       const source = fixtureContext.createBufferSource();
       source.buffer = buffer;
       source.connect(input);
@@ -74,6 +75,7 @@ try {
     );
   };
   const sendText = async text => {
+    if (!await page.locator('#composer').isVisible()) await page.getByRole('button', { name: '文字输入' }).click();
     await page.getByRole('textbox', { name: '文字消息' }).fill(text);
     await page.getByRole('button', { name: '发送', exact: true }).click();
   };
@@ -85,6 +87,18 @@ try {
   };
 
   await page.goto(base);
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
+  assert.equal(await page.locator('#composer').isVisible(), false);
+  assert.equal(await page.locator('#diagnostics').isVisible(), false);
+  await page.getByRole('button', { name: '使用浅色主题' }).click();
+  await page.reload();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
+  await page.getByRole('button', { name: '使用深色主题' }).click();
+  await page.getByRole('button', { name: '通话设置' }).click();
+  assert.equal(await page.locator('#silence').inputValue(), '2.2');
+  assert.equal(await page.locator('#reading').inputValue(), 'live');
+  assert.equal(await page.locator('#duplex').isChecked(), false);
+  await page.locator('#close-settings').click();
   const [plainRequest] = await Promise.all([
     page.waitForRequest(request => request.url() === base + '/demo/v1/responses'),
     sendText('你好'),
@@ -208,15 +222,19 @@ try {
   await sendText('说慢一点');
   await waitForText('#status', /正在播报/);
   assert.match(await page.locator('.entry.assistant:last-child .content').textContent(), /打断测试/);
-  assert.doesNotMatch(await page.locator('.entry.assistant:last-child .content').textContent(), /最后一句/);
+  await waitForText('#metric-audio', /\d+ ms/);
+  assert.doesNotMatch(await page.locator('.entry.assistant:last-child .content').textContent(), /你可以现在开始说话|最后一句/);
   const beforeBackchannel = await page.locator('.entry.user').count();
+  await page.evaluate(() => window.speakTestUtterance(undefined, 0.22));
+  await page.waitForTimeout(2700);
+  assert.equal(await page.locator('#metric-interruption').textContent(), '—');
   await page.evaluate(() => window.speakTestUtterance('嗯。'));
-  await waitForText('#metric-interruption', /\d+ ms/);
-  await waitForText('#status', /正在播报/);
-  await page.waitForFunction(() => window.testPausedPlayback?.state === 'running');
+  await page.waitForTimeout(3000);
+  await page.waitForFunction(() => !window.testPausedPlayback || window.testPausedPlayback.state === 'running');
   assert.equal(await page.locator('.entry.user').count(), beforeBackchannel);
   assert.equal(await page.locator('.entry[data-interrupted="true"]').count(), 0);
   await page.evaluate(() => window.speakTestUtterance());
+  await waitForText('#metric-interruption', /\d+ ms/);
   await waitForText('.entry.user .content', /天气/);
   assert.equal(await page.locator('.entry[data-interrupted="true"]').count(), 1);
   await page.getByRole('button', { name: '挂断' }).click();
@@ -292,7 +310,7 @@ try {
   await page.reload();
   await waitForText('#backend-label', /Pipiclaw 已连接/);
   await waitForText('.entry.assistant .content', /已收到/);
-  await page.locator('.diagnostics summary').click();
+  await page.getByRole('button', { name: '通话诊断' }).click();
   const [report] = await Promise.all([
     page.waitForEvent('download'),
     page.getByRole('button', { name: '导出逐轮计时' }).click(),

@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#f4f7f6">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#111916">
   <title>Turnline · 语音通话</title>
+  <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
@@ -14,6 +15,9 @@
       <a id="home" class="brand" href="/" aria-label="Turnline 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Turnline</a>
       <div class="top-actions">
         <span id="backend-label" data-connection="checking" class="backend" role="status"><i aria-hidden="true"></i>正在连接</span>
+        <button id="toggle-theme" type="button" class="button icon-button" aria-label="使用浅色主题" title="使用浅色主题">
+          <span class="theme-sun" aria-hidden="true">☀</span><span class="theme-moon" aria-hidden="true">☾</span>
+        </button>
         <button id="open-settings" type="button" class="button ghost">通话设置</button>
       </div>
     </div>
@@ -28,7 +32,15 @@
 
     <div class="workspace">
       <section class="call" aria-labelledby="call-title">
-        <div class="call-top"><h1 id="call-title">语音通话</h1><time id="duration">00:00</time></div>
+        <div class="call-top">
+          <h1 id="call-title">语音通话</h1>
+          <div class="call-meta">
+            <time id="duration">00:00</time>
+            <button id="open-diagnostics" type="button" class="button icon-button" aria-label="通话诊断" title="通话诊断" aria-haspopup="dialog">
+              <span class="info-icon" aria-hidden="true">i</span>
+            </button>
+          </div>
+        </div>
         <div class="call-center">
           <div id="orb" class="orb" data-state="idle" aria-hidden="true">
             <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
@@ -48,44 +60,51 @@
       <section class="transcript" aria-labelledby="transcript-title">
         <header class="panel-heading">
           <h2 id="transcript-title">对话记录</h2>
-          <button id="new-session" type="button" class="button subtle">新对话</button>
+          <div class="transcript-actions">
+            <button id="toggle-composer" type="button" class="button subtle" aria-controls="composer" aria-expanded="false">文字输入</button>
+            <button id="new-session" type="button" class="button subtle">新对话</button>
+          </div>
         </header>
         <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="polite">
-          <p id="empty" class="empty">开始通话，或发送一条文字消息。</p>
+          <p id="empty" class="empty">通话内容会显示在这里。</p>
         </div>
         <p id="error" class="error" role="alert" hidden></p>
-        <form id="composer" class="composer">
+        <form id="composer" class="composer" hidden>
           <label class="sr-only" for="message">文字消息</label>
           <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息" disabled>
           <button id="send-message" class="button send" type="submit" disabled>发送</button>
         </form>
       </section>
     </div>
-
-    <details class="diagnostics">
-      <summary><span>通话诊断</span><span id="trace-count" class="trace-count">暂无通话计时</span></summary>
-      <div class="diagnostics-content">
-        <div class="panel-heading">
-          <span id="models" class="models">SenseVoice · Matcha</span>
-          <button id="export-timing" type="button" class="button subtle" disabled>导出逐轮计时</button>
-        </div>
-        <dl class="metrics">
-          <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
-          <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
-          <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
-          <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
-          <div><dt>断句到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
-          <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
-          <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
-          <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
-          <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
-          <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
-          <div><dt>首段文本到收到 PCM</dt><dd id="metric-pcm">—</dd></div>
-          <div><dt>播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
-        </dl>
-      </div>
-    </details>
   </main>
+
+  <dialog id="diagnostics" aria-labelledby="diagnostics-title">
+    <div class="diagnostics-content">
+      <header class="panel-heading">
+        <h2 id="diagnostics-title">通话诊断</h2>
+        <button id="close-diagnostics" type="button" class="button subtle">关闭</button>
+      </header>
+      <div class="diagnostics-meta">
+        <span id="models">SenseVoice · Matcha</span>
+        <span id="trace-count">暂无通话计时</span>
+      </div>
+      <dl class="metrics">
+        <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
+        <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
+        <div><dt>断句到首声</dt><dd id="metric-audio">—</dd></div>
+        <div><dt>检测到开口至暂停</dt><dd id="metric-interruption">—</dd></div>
+        <div><dt>断句到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
+        <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
+        <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
+        <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
+        <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
+        <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
+        <div><dt>首段文本到收到 PCM</dt><dd id="metric-pcm">—</dd></div>
+        <div><dt>播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
+      </dl>
+      <div class="dialog-actions"><button id="export-timing" type="button" class="button ghost" disabled>导出逐轮计时</button></div>
+    </div>
+  </dialog>
 
   <dialog id="settings">
     <form id="settings-form">
@@ -96,16 +115,16 @@
       <div class="fields">
         <label>断句停顿
           <select id="silence">
-            <option value="0.35">紧凑 · 350 毫秒</option>
-            <option value="0.5">快速 · 500 毫秒</option>
-            <option value="0.8" selected>自然 · 800 毫秒</option>
-            <option value="1.2">从容 · 1.2 秒</option>
+            <option value="1">紧凑 · 1 秒</option>
+            <option value="1.5">快速 · 1.5 秒</option>
+            <option value="2.2" selected>自然 · 2.2 秒</option>
+            <option value="3">从容 · 3 秒</option>
           </select>
         </label>
         <label>播报时机
           <select id="reading">
+            <option value="live" selected>流式播报 · 超过 20 字开播</option>
             <option value="confirmed">确认正文后播报</option>
-            <option value="live">分句即时播报</option>
           </select>
         </label>
         <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断</label>

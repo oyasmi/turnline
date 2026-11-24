@@ -148,16 +148,58 @@ export function speechText(text) {
     .trim();
 }
 
-export function splitSpeech(text, flush = false) {
+const FIRST_SPEECH_CHARS = 21;
+
+function openingSpeechEnd(text) {
+  // Mask non-spoken material without changing the offsets into the original stream.
+  const visible = text.replace(/\x60{3}[\s\S]*?(?:\x60{3}|$)|!\[[^\]\n]*\]\([^)]*(?:\)|$)|(?<=\])\([^)]*(?:\)|$)|https?:\/\/[^\s，。！？]+/gu,
+    match => ' '.repeat(match.length));
+  let count = 0;
+  let earliestPause = 0;
+  let previousEnd = 0;
+  const words = /\p{Script=Han}|[A-Za-z][A-Za-z0-9]*(?:[.'_-][A-Za-z0-9]+)*|[0-9]+(?:[.,][0-9]+)*[%％]?|[\p{L}\p{N}]/gu;
+  for (const match of visible.matchAll(words)) {
+    const end = match.index + match[0].length;
+    count += (match[0].match(/[\p{L}\p{N}]/gu) ?? []).length;
+    if (!earliestPause && count >= 12) earliestPause = end;
+    if (count >= FIRST_SPEECH_CHARS) {
+      const pauseAt = visible.slice(earliestPause, end + 8);
+      const pauses = [...pauseAt.matchAll(/[。！？!?；;\n，、：]+|,(?!\d)|\.(?=\s)/gu)];
+      if (pauses.length) {
+        const pause = pauses.at(-1);
+        return earliestPause + pause.index + pause[0].length;
+      }
+      // A Latin word or number at the end of a delta can still be incomplete.
+      if (/^[.'_-]?$/u.test(visible.slice(end)) && /[A-Za-z0-9]$/u.test(match[0])) {
+        return previousEnd >= earliestPause ? previousEnd : 0;
+      }
+      return end;
+    }
+    previousEnd = end;
+  }
+  return 0;
+}
+
+export function splitSpeech(text, flush = false, opening = false) {
   const phrases = [];
   let rest = text;
+  if (opening && !flush) {
+    const end = openingSpeechEnd(rest);
+    if (!end) return { phrases, rest };
+    phrases.push(speechText(rest.slice(0, end)));
+    rest = rest.slice(end);
+  }
   while (rest) {
-    const sentence = /[。！？!?；;\n]+|\.(?=\s)/u.exec(rest);
+    const sentence = /[。！？!?；;\n]+|\.\s+/u.exec(rest);
     let end = sentence ? sentence.index + sentence[0].length : 0;
     // Bound the latency for unpunctuated text while avoiding tiny fragments.
     if ((!end || end > 80) && rest.length >= 64) {
       const soft = Math.max(rest.lastIndexOf('，', 63), rest.lastIndexOf('、', 63), rest.lastIndexOf(' ', 63));
       end = soft >= 24 ? soft + 1 : 64;
+      if (end === 64 && /[A-Za-z0-9._-]/u.test(rest[end] ?? '')) {
+        const name = /[A-Za-z0-9]+(?:['’._-][A-Za-z0-9]+)*['’._-]?$/u.exec(rest.slice(0, end));
+        if (name && name.index >= 24) end = name.index;
+      }
     }
     if (!end && flush) end = rest.length;
     if (!end) break;

@@ -7,7 +7,10 @@ dependencies = [
   "anyio>=4,<5",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "kaldifst>=1.9,<2",
   "numpy>=2,<3",
+  "piper-phonemize==1.5.0",
+  "pypinyin>=0.55,<1",
   "sherpa-onnx==2.0.3",
   "uvicorn>=0.35,<1",
   "websockets>=15,<17",
@@ -15,3 +18,12 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+piper-phonemize = { index = "k2-fsa-phonemize" }
+
+[[tool.uv.index]]
+name = "k2-fsa-phonemize"
+url = "https://k2-fsa.github.io/icefall/piper_phonemize.html"
+format = "flat"
+explicit = true

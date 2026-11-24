@@ -23,7 +23,9 @@ from connection import (
     SESSION_SECONDS, Pipiclaw, SessionStore, default_socket, default_state, loopback, normalize_origin, session_cookie,
 )
 from http_support import ClientStream, error, read_json
-from speech import ListeningTurn, RecognitionQueue, SpeechModels
+from speech import (
+    DEFAULT_SILENCE_SECONDS, LEGACY_SILENCE_OPTIONS, SILENCE_OPTIONS, ListeningTurn, RecognitionQueue, SpeechModels,
+)
 from synthesis import SynthesisBusy, SynthesisQueue
 from tls import certificates
 
@@ -168,8 +170,11 @@ async def listen(ws, models, recognition):
             if (text := message.get("text")) is not None:
                 reset = json.loads(text)
                 epoch, silence = reset["epoch"], reset["silence"]
-                if reset.get("type") != "reset" or type(epoch) is not int or silence not in {0.35, 0.5, 0.8, 1.2}:
+                if reset.get("type") != "reset" or type(epoch) is not int or type(silence) not in {int, float}:
                     raise ValueError("无效的收音设置。")
+                silence = LEGACY_SILENCE_OPTIONS.get(silence, silence)
+                if silence not in SILENCE_OPTIONS:
+                    raise ValueError("无效的断句停顿。")
                 revision += 1
                 while not jobs.empty():
                     jobs.get_nowait()
@@ -200,7 +205,7 @@ async def listen(ws, models, recognition):
 
     try:
         await asyncio.to_thread(models.prepare_recognition)
-        await asyncio.to_thread(listening.reset, 0, 0.8)
+        await asyncio.to_thread(listening.reset, 0, DEFAULT_SILENCE_SECONDS)
         await ws.send_json({"type": "ready"})
         tasks = [asyncio.create_task(receive_audio()), asyncio.create_task(transcribe())]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -235,7 +240,10 @@ async def demo(request: Request):
     progress = "进度" in text
     slow = "慢一点" in text
     if slow:
-        chunks = ["这是一段打断测试。", "你可以现在开始说话，", "或者点一下打断。", "如果你听到了最后一句，说明这轮没有被打断。"]
+        chunks = [
+            "这是一段打断测试，第一句播报时你可以自然地开口插话。",
+            "你可以现在开始说话，", "或者点一下打断。", "如果你听到了最后一句，说明这轮没有被打断。",
+        ]
     elif progress:
         chunks = ["处理完了。", "详细结果可以在屏幕上看。"]
     else:

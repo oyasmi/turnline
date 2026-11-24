@@ -3,23 +3,85 @@ import unittest
 from contextlib import aclosing
 from threading import Event
 from time import monotonic
+import wave
 
 from fastapi import FastAPI, Request
 import httpx
+import numpy as np
 
 from server import tts
-from pronunciation import spoken_english
-from speech import RecognitionQueue
+from phonemizer import MatchaFrontend
+from setup_models import MATCHA, MODELS, SENSE_VOICE, SILERO
+from speech import DEFAULT_SILENCE_SECONDS, FRAME_SAMPLES, SAMPLE_RATE, ListeningTurn, RecognitionQueue
 from synthesis import SynthesisBusy, SynthesisQueue
 from support import running
 
 
-class EnglishSpeechTest(unittest.TestCase):
-    def test_english_is_casefolded_and_an_unknown_name_is_spelled(self):
-        words = set("abcdefghijklmnopqrstuvwxyz") | {"hello", "kubernetes", "world", "thirty", "seven", "percent"}
-        text = spoken_english("你好 Hello Kubernetes Zebrix-world", words)
-        self.assertEqual(text.split(), ["你好", "hello", "kubernetes", "z", "e", "b", "r", "i", "x", "world"])
-        self.assertEqual(spoken_english("37 percent.", words), "thirty seven percent.")
+class BilingualSpeechTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        folder = MODELS / MATCHA
+        if not (folder / "tokens.txt").is_file():
+            raise unittest.SkipTest("Run setup_models.py to install the Matcha frontend resources.")
+        rules = [folder / filename for filename in ("phone-zh.fst", "date-zh.fst", "number-zh.fst")]
+        cls.frontend = MatchaFrontend(folder / "tokens.txt", rules)
+
+    def test_mixed_sentence_preserves_context_and_punctuation(self):
+        tokens = self.frontend.tokens
+        mixed = tokens("国内：MiniMax 发布 H3 Family，包含 H3-Highspeed、H3-Lite。")
+        self.assertEqual(mixed[:3], ["guo2", "nei4", ":"])
+        for phrase in ("MiniMax", "H3 Family", "H3-Highspeed", "H3-Lite"):
+            english = tokens(phrase)
+            self.assertTrue(english)
+            self.assertIn(" ".join(english), " ".join(mixed))
+        self.assertEqual(mixed.count(","), 2)
+        self.assertEqual(mixed[-1], ".")
+
+    def test_new_names_use_word_pronunciation_and_versions_are_general(self):
+        tokens = self.frontend.tokens
+        name = tokens("Zebrix")
+        self.assertTrue(name)
+        self.assertNotEqual(name, tokens("Z E B R I X"))
+        self.assertIn(" ".join(name), " ".join(tokens("今天发布 Zebrix X7-Pro 语音模型。")))
+        self.assertEqual(tokens("Ｖ４.２"), tokens("V four point two"))
+        self.assertEqual(tokens("X7-Pro"), tokens("X seven Pro"))
+
+    def test_preserves_chinese_number_rules_and_contextual_pinyin(self):
+        tokens = self.frontend.tokens
+        self.assertEqual(tokens("下载量超过1.48亿次"), tokens("下载量超过一点四八亿次"))
+        self.assertIn(" ".join(tokens("拨打幺幺零")), " ".join(tokens("请拨打110")))
+        self.assertEqual(tokens("重庆银行行长"), ["chong2", "qing4", "yin2", "hang2", "hang2", "zhang3"])
+
+
+class ListeningTurnTest(unittest.TestCase):
+    def test_rejects_a_short_clip_and_keeps_speech_across_a_normal_pause(self):
+        fixture = MODELS / SENSE_VOICE / "test_wavs" / "zh.wav"
+        if not fixture.is_file() or not (MODELS / SILERO).is_file():
+            self.skipTest("Run setup_models.py to install the speech fixtures.")
+        with wave.open(str(fixture)) as recording:
+            self.assertEqual(recording.getframerate(), SAMPLE_RATE)
+            signal = np.frombuffer(recording.readframes(recording.getnframes()), dtype="<i2").astype("<f4") / 32768
+        active = np.flatnonzero(np.abs(signal) > 0.02)
+        voice = signal[active[0]:active[-1] + 1]
+        silence = np.zeros(3 * SAMPLE_RATE, dtype="<f4")
+        listener = ListeningTurn()
+
+        def detect(samples):
+            listener.reset(0, DEFAULT_SILENCE_SECONDS)
+            audio = np.concatenate((samples, silence))
+            segments = []
+            starts = 0
+            for i in range(0, len(audio) - FRAME_SAMPLES + 1, FRAME_SAMPLES):
+                started, available = listener.accept(audio[i:i + FRAME_SAMPLES].tobytes())
+                starts += started
+                segments.extend(available)
+            return starts, segments
+
+        self.assertEqual(detect(voice[:int(0.22 * SAMPLE_RATE)]), (0, []))
+        gap = np.zeros(int(1.7 * SAMPLE_RATE), dtype="<f4")
+        starts, segments = detect(np.concatenate((voice, gap, voice)))
+        self.assertEqual(starts, 1)
+        self.assertEqual(len(segments), 1)
 
 
 class RecognitionQueueTest(unittest.IsolatedAsyncioTestCase):

@@ -55,18 +55,19 @@ uv run python server.py --host 0.0.0.0 --tls-cert /path/fullchain.pem --tls-key 
 
 ## 通话
 
-- 默认用 800 毫秒断句，给明显没说完的短前缀留一次接续机会。「嗯」这类纯附和会被略过，确认词和问题仍可提交。
+- 默认用 2.2 秒停顿断句，可在通话设置选 1、1.5、2.2 或 3 秒。语音活动检测要求约 320 毫秒的开口信号才进入识别，转写后的纯附和也会被略过。
+- 默认流式播报。回复累计超过 20 个可朗读字符时，就近分段开始合成，短回复在正文结束时播报。可以在通话设置改为「确认正文后播报」。
 - 助手在后台工具等待较久时给一句短的语音回执。最终回答确认后播报，百分比、容量和常见目录名会转换成适合朗读的表达。
 - 播报时可按「打断」。需要免手操作时，在通话设置中开启开口打断。挂断后仍可在同一会话发文字或查看后台任务结果。
 - 对话保存在 Pipiclaw。中转模式自动创建浏览器会话，隔离各浏览器的对话记录。Pipiclaw 接收麦克风的转写文字。
-- 「通话诊断」可导出最近一通的逐轮 JSON。它记录识别、后端、合成、首声和取消时间，省去录音和对话正文。
+- 默认使用深色主题，页首图标可切换并记住深浅主题。「文字输入」可展开对话记录下的输入框。「语音通话」卡片的 ⓘ 可查看诊断和导出逐轮计时。
 
 ## 语音模型
 
-默认使用 `matcha-icefall-zh-en` 与 Vocos。中英文共用一套声学模型和音色。Sherpa-ONNX 2.x 通过词表输入发音，安装脚本另外下载并校验英文词表，与模型原装的中文词表结合。常见技术名有专门发音，未收录的英文名称按字母拼读。
+默认使用 `matcha-icefall-zh-en` 与 Vocos。中文沿用模型的数字、日期和电话归一化规则，再用 pypinyin 转成拼音。英文用 eSpeak NG 转成音素，字母数字混合的型号和版本号使用统一的结构规则。中英文在同一份音素序列中送给 Matcha，使用同一个音色。
 
 - [Matcha 中英模型和上游样音](https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese-English/matcha-icefall-zh-en.html)
-- [Sherpa-ONNX 英文发音词表](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/lexicon-en-us.txt)
+- [Sherpa-ONNX 中英混读音素输入示例](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.3/python-api-examples/test-offline-tts-matcha-zh-en-phonemize.py)
 
 ## 开发验证
 

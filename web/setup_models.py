@@ -64,7 +64,7 @@ def install(asset):
 def main():
     MODELS.mkdir(exist_ok=True)
     with ThreadPoolExecutor() as pool:
-        list(pool.map(install, ASSETS))
+        list(pool.map(install, (asset for asset in ASSETS if asset[2] != ENGLISH_LEXICON)))
     print(f"Voice models are ready in {MODELS}")
 
 

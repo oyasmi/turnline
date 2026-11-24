@@ -23,7 +23,12 @@ const metrics = {
 const messages = $('messages');
 const field = $('message');
 const dialog = $('settings');
-const PREFERENCES = 'turnline.preferences.v1';
+const diagnostics = $('diagnostics');
+const PREFERENCES = 'turnline.preferences.v2';
+const PREVIOUS_PREFERENCES = 'turnline.preferences.v1';
+const DEFAULT_SILENCE = 2.2;
+const SILENCE_OPTIONS = [1, 1.5, DEFAULT_SILENCE, 3];
+const PREVIOUS_SILENCE = { 0.35: 1, 0.5: 1.5, 0.8: DEFAULT_SILENCE, 1.2: 3 };
 const ACTIVE_CONVERSATION = 'turnline.active-conversation.v1';
 const DIRECT_ADDRESS = 'turnline.direct-address.v1';
 const DIRECT_CREDENTIALS = 'turnline.direct-credentials.v1';
@@ -62,15 +67,18 @@ function saveDirectSettings(url, key) {
 
 function preferences() {
   try {
-    const saved = JSON.parse(stored(PREFERENCES));
+    const current = JSON.parse(stored(PREFERENCES));
+    const saved = current ?? JSON.parse(stored(PREVIOUS_PREFERENCES));
+    const silence = saved?.silence;
     return {
-      reading: saved?.reading === 'live' ? 'live' : 'confirmed',
-      silence: [0.35, 0.5, 0.8, 1.2].includes(saved?.silence) ? saved.silence : 0.8,
+      reading: current?.reading === 'confirmed' ? 'confirmed' : 'live',
+      silence: SILENCE_OPTIONS.includes(silence) ? silence
+        : (typeof silence === 'number' ? PREVIOUS_SILENCE[silence] : undefined) ?? DEFAULT_SILENCE,
       duplex: saved?.duplex === true,
       instructions: typeof saved?.instructions === 'string' ? saved.instructions.slice(0, 3000) : '',
     };
   } catch {
-    return { reading: 'confirmed', silence: 0.8, duplex: false, instructions: '' };
+    return { reading: 'live', silence: DEFAULT_SILENCE, duplex: false, instructions: '' };
   }
 }
 
@@ -267,7 +275,7 @@ function render() {
     label = player.active ? '正在合成' : '等待回复';
     hint = '收到正文后会显示在对话记录里。';
   } else if (call) {
-    state = 'listening';
+    state = muted ? 'idle' : 'listening';
     label = muted ? '麦克风已静音' : '正在聆听';
     hint = muted ? '你仍可以输入文字消息。' : '说完稍作停顿即可发送。';
   }
@@ -355,6 +363,7 @@ function hangUp() {
 }
 
 function addMessage(role, text = '') {
+  const follow = role === 'user' || followingMessages();
   $('empty').hidden = true;
   const row = document.createElement('article');
   const who = document.createElement('span');
@@ -369,12 +378,16 @@ function addMessage(role, text = '') {
   flag.textContent = '已打断';
   row.append(who, content, flag);
   messages.append(row);
-  scrollMessages();
+  if (follow) scrollMessages();
   return { row, who, content };
 }
 
 function scrollMessages() {
   messages.scrollTop = messages.scrollHeight;
+}
+
+function followingMessages() {
+  return messages.scrollHeight - messages.clientHeight - messages.scrollTop < 40;
 }
 
 function rememberAnswer(current, content) {
@@ -547,16 +560,17 @@ function updateText(current, entry) {
     setMetric(current, 'text', current.firstText - current.sentAt);
   }
   entry.display ??= addMessage('assistant');
+  const follow = followingMessages();
   const commentary = entry.phase === 'commentary';
   entry.display.row.classList.toggle('commentary', commentary);
   entry.display.who.textContent = commentary ? '进度' : '助手';
   entry.display.content.textContent = entry.text;
-  scrollMessages();
+  if (follow) scrollMessages();
 }
 
 function drain(current, entry, finish) {
-  if (entry.phase === 'commentary') return;
-  const split = splitSpeech(entry.pendingSpeech, finish);
+  if (!current.voice || entry.phase === 'commentary') return;
+  const split = splitSpeech(entry.pendingSpeech, finish, !current.firstSpeakable);
   entry.pendingSpeech = split.rest;
   for (const phrase of split.phrases) {
     entry.spoken = true;
@@ -570,11 +584,13 @@ function outputItem(current, key, item) {
   const entry = itemEntry(current, key);
   if (entry.done) return;
   entry.done = true;
-  entry.phase = item.phase;
+  entry.phase = item.phase ?? entry.phase;
+  const spokenPrefix = entry.text.slice(0, entry.text.length - entry.pendingSpeech.length);
   const finalText = item.content?.filter(part => part.type === 'output_text').map(part => part.text).join('\n');
   entry.text = finalText || entry.text;
   updateText(current, entry);
   if (current.settings.reading === 'confirmed' || !entry.spoken) entry.pendingSpeech = entry.text;
+  else if (entry.text.startsWith(spokenPrefix)) entry.pendingSpeech = entry.text.slice(spokenPrefix.length);
   drain(current, entry, true);
 }
 
@@ -795,6 +811,8 @@ $('forget-direct').onclick = () => {
 };
 $('open-settings').onclick = openSettings;
 $('close-settings').onclick = () => dialog.close();
+$('open-diagnostics').onclick = () => diagnostics.showModal();
+$('close-diagnostics').onclick = () => diagnostics.close();
 $('settings-form').onsubmit = event => {
   event.preventDefault();
   const next = {
@@ -819,6 +837,15 @@ $('mute').onclick = () => {
 };
 $('interrupt').onclick = () => interrupt();
 $('new-session').onclick = newSession;
+const composerToggle = $('toggle-composer');
+composerToggle.onclick = () => {
+  const composer = $('composer');
+  const open = composer.hidden;
+  composer.hidden = !open;
+  composerToggle.setAttribute('aria-expanded', String(open));
+  composerToggle.textContent = open ? '收起文字' : '文字输入';
+  if (open && !field.disabled) field.focus();
+};
 $('composer').onsubmit = event => {
   event.preventDefault();
   const text = field.value.trim();

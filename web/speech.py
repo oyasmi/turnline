@@ -2,19 +2,21 @@
 
 import asyncio
 from functools import cached_property
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Event, Lock
 from time import monotonic
 
 import numpy as np
 import sherpa_onnx
 
-from pronunciation import ENGLISH_LEXICON, build_lexicon, spoken_english
+from phonemizer import MatchaFrontend
 from setup_models import MATCHA, MATCHA_MODEL, MATCHA_VOCODER, MODELS, SENSE_VOICE, SILERO
 
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512
+MIN_SPEECH_SECONDS = 0.32
+DEFAULT_SILENCE_SECONDS = 2.2
+SILENCE_OPTIONS = {1.0, 1.5, DEFAULT_SILENCE_SECONDS, 3.0}
+LEGACY_SILENCE_OPTIONS = {0.35: 1.0, 0.5: 1.5, 0.8: DEFAULT_SILENCE_SECONDS, 1.2: 3.0}
 VAD_BUFFER_SECONDS = 30
 PRE_ROLL_SAMPLES = 2 * FRAME_SAMPLES
 HISTORY_CAPACITY = VAD_BUFFER_SECONDS * SAMPLE_RATE + PRE_ROLL_SAMPLES
@@ -53,29 +55,20 @@ class SpeechModels:
         folder = MODELS / MATCHA
         acoustic = folder / MATCHA_MODEL
         vocoder = MODELS / MATCHA_VOCODER
-        lexicon = folder / "lexicon.txt"
         tokens = folder / "tokens.txt"
-        english = MODELS / ENGLISH_LEXICON
         rules = [folder / name for name in ("phone-zh.fst", "date-zh.fst", "number-zh.fst")]
-        require(acoustic, vocoder, lexicon, tokens, english, *rules)
-        with TemporaryDirectory(prefix="turnline-matcha-") as directory:
-            bilingual = Path(directory) / "lexicon.txt"
-            words = build_lexicon(bilingual, lexicon, english, tokens)
-            model = sherpa_onnx.OfflineTtsModelConfig(
-                matcha=sherpa_onnx.OfflineTtsMatchaModelConfig(
-                    acoustic_model=str(acoustic), vocoder=str(vocoder), tokens=str(tokens),
-                    lexicon=str(bilingual),
-                ),
-                num_threads=self.tts_threads,
-            )
-            config = sherpa_onnx.OfflineTtsConfig(
-                model=model,
-                rule_fsts=",".join(map(str, rules)),
-                max_num_sentences=1,
-            )
-            if not config.validate():
-                raise RuntimeError("语音模型配置无效。请检查模型文件。")
-            return sherpa_onnx.OfflineTts(config), words
+        require(acoustic, vocoder, tokens, *rules)
+        frontend = MatchaFrontend(tokens, rules)
+        model = sherpa_onnx.OfflineTtsModelConfig(
+            matcha=sherpa_onnx.OfflineTtsMatchaModelConfig(
+                acoustic_model=str(acoustic), vocoder=str(vocoder), tokens=str(tokens),
+            ),
+            num_threads=self.tts_threads,
+        )
+        config = sherpa_onnx.OfflineTtsConfig(model=model, max_num_sentences=1)
+        if not config.validate():
+            raise RuntimeError("语音模型配置无效。请检查模型文件。")
+        return sherpa_onnx.OfflineTts(config), frontend
 
     def prepare_recognition(self):
         with self.recognition_lock:
@@ -104,12 +97,16 @@ class SpeechModels:
             if cancelled.is_set():
                 return
             started = monotonic()
-            voice, words = self.matcha
+            voice, frontend = self.matcha
             if speaker != 0:
                 raise ValueError("请选择有效的音色。")
             config = sherpa_onnx.GenerationConfig()
             config.sid = speaker
             config.speed = 1.07
+            tokens = frontend.tokens(text)
+            if not tokens:
+                raise ValueError("找不到可播报的文字。")
+            config.tokens = [tokens]
             has_audio = False
 
             def on_pcm(samples, _progress):
@@ -126,7 +123,7 @@ class SpeechModels:
 
             if cancelled.is_set():
                 return
-            voice.generate(spoken_english(text, words), config, callback=on_pcm)
+            voice.generate("", config, callback=on_pcm)
             if not has_audio and not cancelled.is_set():
                 raise RuntimeError("语音模型未生成可播放音频。请重试或改用文字。")
 
@@ -188,7 +185,7 @@ class ListeningTurn:
         config.sample_rate = SAMPLE_RATE
         config.silero_vad.model = str(model)
         config.silero_vad.threshold = 0.55
-        config.silero_vad.min_speech_duration = 0.18
+        config.silero_vad.min_speech_duration = MIN_SPEECH_SECONDS
         config.silero_vad.min_silence_duration = silence
         config.silero_vad.max_speech_duration = 20.0
         config.silero_vad.window_size = FRAME_SAMPLES

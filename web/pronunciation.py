@@ -1,14 +1,9 @@
-"""Bridge the packaged Matcha Chinese phones and the English pronunciation lexicon."""
+"""Build the bilingual lexicon consumed by Android's Matcha asset preparation."""
 
 import re
 from shutil import copyfileobj
 
 ENGLISH_LEXICON = "lexicon-en-us.txt"
-HAN = re.compile(r"[㐀-鿿𠀀-𱍏]")
-NUMBER = re.compile(r"(?<![\w.])([+-]?)(\d+)(?:\.(\d+))?(?!\w|\.\d)")
-SMALL = ("zero one two three four five six seven eight nine ten eleven twelve thirteen "
-         "fourteen fifteen sixteen seventeen eighteen nineteen").split()
-TENS = ("zero ten twenty thirty forty fifty sixty seventy eighty ninety").split()
 WORD = re.compile(r"[A-Za-z]+(?:['’\-][A-Za-z]+)*")
 NAMES = {
     "codex": "k ˈ o ʊ d ɛ k s",
@@ -49,39 +44,3 @@ def build_lexicon(path, chinese, english, tokens):
             copyfileobj(source, output)
         output.write("\n")
         return add_english(output, english, tokens)
-
-
-def english_integer(number):
-    if number < 20:
-        return SMALL[number]
-    if number < 100:
-        tens, ones = divmod(number, 10)
-        return TENS[tens] + (" " + SMALL[ones] if ones else "")
-    for scale, label in ((1_000_000, "million"), (1_000, "thousand"), (100, "hundred")):
-        if number >= scale:
-            high, low = divmod(number, scale)
-            return english_integer(high) + " " + label + (" " + english_integer(low) if low else "")
-
-
-def english_number(match):
-    sign, whole, fraction = match.groups()
-    if len(whole) >= 9 or (len(whole) > 1 and whole.startswith("0")):
-        spoken = " ".join(SMALL[int(digit)] for digit in whole)
-    else:
-        spoken = english_integer(int(whole))
-    if fraction:
-        spoken += " point " + " ".join(SMALL[int(digit)] for digit in fraction)
-    return {"-": "minus ", "+": "plus ", "": ""}[sign] + spoken
-
-
-def spoken_english(text, words):
-    def normalize(match):
-        word = match.group().lower().replace("’", "'")
-        if word in words:
-            return word
-        parts = [p if p in words else " ".join(p.replace("'", "")) for p in word.split("-")]
-        return " " + " ".join(parts) + " "
-
-    if not HAN.search(text):
-        text = NUMBER.sub(english_number, text)
-    return WORD.sub(normalize, text)

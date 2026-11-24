@@ -120,6 +120,62 @@ wheels = [
 ]
 
 [[package]]
+name = "kaldifst"
+version = "1.9.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/4a/30f2d4c823ce3c7ac9c68d219e89aa06b543867fcf207e4c9d76355a5e2f/kaldifst-1.9.2.tar.gz", hash = "sha256:fa89f518b75d26dfff0aeab856e10ac2a0bcd7cb9396dfaccd201a112e7cbff9", size = 157935, upload-time = "2026-11-21T08:24:39.094Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/c6/b8db4307ee218a30c1de6b318420441234e659fad101971ff5810eeb9198/kaldifst-1.9.2-cp311-cp311-macosx_10_15_universal2.whl", hash = "sha256:b9c22e05f109b264b59741ab78d9b134a1f24b4bdec46d164f983e03d3d6fb68", size = 2533790, upload-time = "2026-11-21T09:44:09.246Z" },
+    { url = "https://files.pythonhosted.org/packages/40/f7/5ca14bec6d485c5080498c7e68d95723da41cd3261dcefaefebac699b251/kaldifst-1.9.2-cp311-cp311-macosx_10_15_x86_64.whl", hash = "sha256:686094ca483e26fea3d2c854fb986059ab36b326bdc89cd83111bbd08adf27e5", size = 1352543, upload-time = "2026-11-21T11:12:21.901Z" },
+    { url = "https://files.pythonhosted.org/packages/55/76/caed0615c4e1262be64278ea560f9d20cd747c1d1e3a4ea3917e4323b514/kaldifst-1.9.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:331c5b9d7be5b75e770d77d3f8a605892745cb9629dbf7e64a55c0ae739603f2", size = 1192576, upload-time = "2026-11-21T08:51:58.043Z" },
+    { url = "https://files.pythonhosted.org/packages/12/97/e3eb6e7f376dcccfdead4e45893b68f5e216e4174c77ca17cad6079295c6/kaldifst-1.9.2-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7ba5c4f9108c8c0057db78cf3acd89f8979475f650175be2829e82d74193e307", size = 1740962, upload-time = "2026-11-21T08:25:05.994Z" },
+    { url = "https://files.pythonhosted.org/packages/79/85/d0e2e1c2fb409118bae0a340261b9dbaad947d51443b045fa95ce5b0fd0b/kaldifst-1.9.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:69c4014ad466f0ea9dbe833056b43baff3972453f5bf44ec2a68b6544e1d2648", size = 1858417, upload-time = "2026-11-21T08:25:17.472Z" },
+    { url = "https://files.pythonhosted.org/packages/00/95/3db0d2f17d52e421dc41c355906bfa9c0bbe0c800a977994aca2254dbdd3/kaldifst-1.9.2-cp311-cp311-manylinux_2_31_armv7l.whl", hash = "sha256:03a358d5a9abe61a80026ab283d0789a8c51b7e7a7eccdc68f8653d055f735c5", size = 1420706, upload-time = "2026-11-21T08:36:00.137Z" },
+    { url = "https://files.pythonhosted.org/packages/49/61/e289155f9e93f032929c561ab53fa3beb66fd9a4c725d6f64c4830b87415/kaldifst-1.9.2-cp311-cp311-win32.whl", hash = "sha256:103ac4152f9fce0ce936eaed8695e5f7a31da82d4ecc618035eafd7fc9d0111a", size = 1174717, upload-time = "2026-11-21T08:44:24.059Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/f1/bfb8573c405e718c047634cb909470d2e1d3dc2a026b651e909daea93167/kaldifst-1.9.2-cp311-cp311-win_amd64.whl", hash = "sha256:8ed77863c737b37737ed93c3fe75aa9b806df48b7235e2606320f82077903282", size = 1286201, upload-time = "2026-11-21T08:41:03.322Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/a0/2042985c6378492475b66bef8f886d4ec5ad9fc33e79434ab110223796ab/kaldifst-1.9.2-cp311-cp311-win_arm64.whl", hash = "sha256:1f172a0da5487c380c273f98792a9fbf725cef1879bc65249af0213927826142", size = 1343041, upload-time = "2026-11-21T08:31:29.18Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/31/056ce3e6aa1fd2ce2654ba978e1b330632724522e10efa350ad3ec888d02/kaldifst-1.9.2-cp312-cp312-macosx_10_15_universal2.whl", hash = "sha256:d544ee63cc56b11a8305ed12fd9773ec917fd6ebde3920aaf3ec6d186af01080", size = 2545517, upload-time = "2026-11-21T11:13:29.951Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/fb/229901495c33d5bd9b056a1abd6762e0f838066441831edce61ac2b71db6/kaldifst-1.9.2-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:470f613dd6610ff8d2bb913083ce89ca9cec0f58bc5c0c351d0815d82ae78e96", size = 1360917, upload-time = "2026-11-21T11:16:39.55Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/24/7d8a4aecaa79a050b48b95d04a8c6869ec579b8f9bf577012550ea2b1aad/kaldifst-1.9.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:cc7e109af00be05ef1e4522cc2f3c9ebdb58ad5f3fc0a7a25ae4d2b7b1675ad5", size = 1194917, upload-time = "2026-11-21T11:21:10.141Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/94/16eb07f63029c8e28c1342ce32966c720d492bc91b13f38de49e6a0540cc/kaldifst-1.9.2-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e278e5c34cec4200e150aa243978ae3bc98ae30063a0be182043150d2f545c59", size = 1739587, upload-time = "2026-11-21T08:30:56.194Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/c2/f9c3cbca3ddb5e6fb21dcad3e5502dd7fca10448f7f6c5259ee87ccc1c3b/kaldifst-1.9.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:eeb80fd80a52aabe7050b19d36c35638acb480a0c8b2e2c7afb262e6a62e275e", size = 1862695, upload-time = "2026-11-21T08:31:56.363Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/b7/0316677792d9cf7f18dcdc0148f0fabb18d627454cec9321e848e8583085/kaldifst-1.9.2-cp312-cp312-manylinux_2_31_armv7l.whl", hash = "sha256:784a1d22bb1ad5a0e661636f22547246c60e794abb2e832a4799778d9f357b4a", size = 1424515, upload-time = "2026-11-21T08:56:58.708Z" },
+    { url = "https://files.pythonhosted.org/packages/52/57/e72fe68ac42b17ffe878b28e49630682048f6fb8f6db8db91b48a4eeef00/kaldifst-1.9.2-cp312-cp312-win32.whl", hash = "sha256:a027eedde6659eb350d366312613a3b8988466cd86606d0be7bbfb6d9a27e7fa", size = 1175084, upload-time = "2026-11-21T08:49:41.668Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/fe/756a48860346ad599e3e1671c91c6c22a48831c252dada5aa65fd1d644c7/kaldifst-1.9.2-cp312-cp312-win_amd64.whl", hash = "sha256:1149ab0465ea180ccfda1fd4ad04960fec6bff7bbac5be4233ff3eb3e79e8081", size = 1287253, upload-time = "2026-11-21T08:49:33.737Z" },
+    { url = "https://files.pythonhosted.org/packages/56/53/2d656230c299973462ca031314b9c6c341fec4be56de0d1a5e85bfb24f96/kaldifst-1.9.2-cp312-cp312-win_arm64.whl", hash = "sha256:b39747c7d6041f5806d57e399a53d3a8536855153420bde301d3e464bce819a7", size = 1343911, upload-time = "2026-11-21T08:31:08.323Z" },
+    { url = "https://files.pythonhosted.org/packages/11/ad/78f5e4ff53890577d5f1c25b20f42b2cc41eb407e500b6439db28b430d20/kaldifst-1.9.2-cp313-cp313-macosx_10_15_universal2.whl", hash = "sha256:5afe6ef32e0985bc36d8c560e85a85443ed069da8326c443a4e6664515470f2d", size = 2545477, upload-time = "2026-11-21T09:41:43.648Z" },
+    { url = "https://files.pythonhosted.org/packages/15/38/43cd15d7ab57a59a63ec50e8b91d565c251a9f61fd0a1f27bcb078968b83/kaldifst-1.9.2-cp313-cp313-macosx_10_15_x86_64.whl", hash = "sha256:f294cb62198c3f194a0a0b8965f36d738beacc514d7eb5a660ca3210099fd668", size = 1360856, upload-time = "2026-11-21T11:29:39.734Z" },
+    { url = "https://files.pythonhosted.org/packages/19/bd/c8b42cd362bbab9b679c4f201fc37ff68d4772212b4386665e6916b83dfc/kaldifst-1.9.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e654cc2554955e651fd9c0cab65bec77ff02b0a8e7d659a1b8228f5b09823568", size = 1194980, upload-time = "2026-11-21T11:01:27.076Z" },
+    { url = "https://files.pythonhosted.org/packages/97/ab/7ca9de2f4dfc8e84ef5b41b10ac33ab882f58686da360cf5b5660a0aebda/kaldifst-1.9.2-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a8d3d220054981c814f46f4e38cb1fb18fdb1b05855c72dc99ad3ad8816d30d1", size = 1739738, upload-time = "2026-11-21T08:24:46.397Z" },
+    { url = "https://files.pythonhosted.org/packages/01/1b/9fa914c9a117eecf06604b87a51f8d0d472694d35a467da76b6bd5a7987d/kaldifst-1.9.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:48c94be4e840d00c4bc7de4bfc806fc1d9566942effb5b1f68e0f5ae4960383f", size = 1864360, upload-time = "2026-11-21T08:37:22.585Z" },
+    { url = "https://files.pythonhosted.org/packages/11/44/2954f845a2dceacca8d0ab0ca5083d291cfef6eb67761858edb088544e70/kaldifst-1.9.2-cp313-cp313-manylinux_2_31_armv7l.whl", hash = "sha256:74776dcbd0bc36f29e50ad23bb03d1a86cbf96c06b828bd8e1e179ce9011a0a5", size = 1424310, upload-time = "2026-11-21T08:23:37.135Z" },
+    { url = "https://files.pythonhosted.org/packages/16/56/7e0bfb8c85e1c618024a40acb24df638a1233018b2eb10419d7e3b4c8e7b/kaldifst-1.9.2-cp313-cp313-win32.whl", hash = "sha256:3535614477c682826c90ea338ccc5380efddcba2b4ff9e9296a5f89d342d914c", size = 1174998, upload-time = "2026-11-21T08:49:41.34Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/30/0f4601e1da6ca96a6de796528a26299408f90be44e95efd527a3e49c21e0/kaldifst-1.9.2-cp313-cp313-win_amd64.whl", hash = "sha256:4455a33176179a7b15c85609ff839accc8ee5b7eda38d44388adc4213e1e0c77", size = 1287173, upload-time = "2026-11-21T08:34:47.108Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/cd/72d1d347d18661c51d02b1594512c81553321b9b26829ef1038a7b28308c/kaldifst-1.9.2-cp313-cp313-win_arm64.whl", hash = "sha256:cde97bc5db7491ebd0324676e817863e6d135ccae53a42eccd3a699083e332a5", size = 1343997, upload-time = "2026-11-21T08:29:20.96Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/a9/6d39366d20eaea3c8f2c4721c5171b1cf609898d2ab78ae4affdadd00be7/kaldifst-1.9.2-cp314-cp314-android_24_arm64_v8a.whl", hash = "sha256:ebc1b559187ce5307536d794616e674286bec8db3ed235994602e2446b0aafcf", size = 1532158, upload-time = "2026-11-21T08:21:11.727Z" },
+    { url = "https://files.pythonhosted.org/packages/93/1b/70e1c6973e5d841d69680816a18eb97ff9dfc3293831a177eb88220cfbc0/kaldifst-1.9.2-cp314-cp314-android_24_armeabi_v7a.whl", hash = "sha256:3d0a66ee2377ce9fc8d4a630711efe61c7a8769720f803a78e609bc36db9d6d3", size = 1495480, upload-time = "2026-11-21T08:32:40.078Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/54/6a697e6f7471666ab7407359bf76a855bad4678eeb5f2aeb4adb4f76c19c/kaldifst-1.9.2-cp314-cp314-android_24_x86_64.whl", hash = "sha256:a898b3227b1d6534eb133abf0fe08d94f8a362d24905e83421b8ac621c89926f", size = 1627527, upload-time = "2026-11-21T08:40:58.758Z" },
+    { url = "https://files.pythonhosted.org/packages/90/2b/3f15294afc43f48a68ff591974b8dabba579779e69397103becf05a567c4/kaldifst-1.9.2-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:523993632f2a8827f78886070eb1a492f516edd2c9f94c05b0c9bfaf7b093d92", size = 2546732, upload-time = "2026-11-21T11:09:52.086Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/c4/38ed152bbc235142eb86514ef4a4df403fd7ee93262a27f70117dc19eaa4/kaldifst-1.9.2-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:a90ed0b4aa57d00567979e30b5a952652e650da65f6a68d5a562ca38e869757b", size = 1361130, upload-time = "2026-11-21T11:35:01.997Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/8f/dcb1ce9e244e9661e9b1dfbf14a2c93701d6dde8f74c958c4999c942c902/kaldifst-1.9.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:1767b9ef9a5e29d6d1f9d409f7dfdbc35a656213e179f5738c4ed9d29221616c", size = 1196327, upload-time = "2026-11-21T11:15:43.881Z" },
+    { url = "https://files.pythonhosted.org/packages/36/a3/180e72eb08485df337d0b2325fc0de50c9995a0aee1839a25fcca7c5f78f/kaldifst-1.9.2-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ffbba9ec069ee69ec1b6ef12aa81112abcd5b020c9be8828ad40fb56bfbc971c", size = 1741484, upload-time = "2026-11-21T08:43:44.801Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/2e/b7f82910c0a3e623d5f55b264b3cf874f3ac577569e765eb6cc19cd4d56f/kaldifst-1.9.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4ef6893d8e38b98f675488da4cf79be635714a93ee906f788eaab2a32f40fc77", size = 1865135, upload-time = "2026-11-21T08:50:25.372Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/0f/3e5e51113cbce5899a12b971e1005947e204902a26544f41971f521d5cda/kaldifst-1.9.2-cp314-cp314-manylinux_2_31_armv7l.whl", hash = "sha256:7f5fa94ca1bde6f66397f5ab27667aa7a6bea0b03e15c94295924638ade1244f", size = 1423001, upload-time = "2026-11-21T08:39:54.884Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/ed/864ef7c3f399bc4335865443a1c397772d14220ae7a16edc6f27ce137c50/kaldifst-1.9.2-cp314-cp314-win32.whl", hash = "sha256:f6b531e9fc1ddb827a9cd9532dc4ae19e0fa8c8c8d99a1692441d2594ab47f84", size = 1191531, upload-time = "2026-11-21T08:41:58.3Z" },
+    { url = "https://files.pythonhosted.org/packages/61/76/30754703f6345dd6ed9d2b3057a707ada2dd2b14107a2f1ee1d3414b3396/kaldifst-1.9.2-cp314-cp314-win_amd64.whl", hash = "sha256:7fca2d476832fadc39b13d47c15ee0bd93f818be67edf1d16600abddc757e9cc", size = 1327842, upload-time = "2026-11-21T08:41:25.429Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/72/eb9c79b042801b47fcc34367cd10d6c2e6d870615a555e34dd07cf164860/kaldifst-1.9.2-cp314-cp314-win_arm64.whl", hash = "sha256:7d83ec462b8192462a5c043091634f98eef554df934fd1a16dad2a0356254254", size = 1377268, upload-time = "2026-11-21T08:29:13.141Z" },
+    { url = "https://files.pythonhosted.org/packages/87/4b/78b3d17cae8bbf3c31f03959ecaa913ad3db5b5b501e10897d457669bf60/kaldifst-1.9.2-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:5ad0aa80dc8576726befc35ea1e10077024a39bb45ab22f21357ce210dea627f", size = 2546677, upload-time = "2026-11-21T11:29:23.227Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/e8/92efde901a9fce51c2759b537be0f885367741c7c8dc1b4bc46ec712ffeb/kaldifst-1.9.2-cp315-cp315-macosx_10_15_x86_64.whl", hash = "sha256:2eb84e9962d28a04120b32c7e63569c828c8d25bd0eedc3a4c25cf2f0d7fb6f4", size = 1361123, upload-time = "2026-11-21T10:55:38.252Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/f1/826f77f49b447cd2697840b89b89fde17c2c8ece6abf5b56cf59c3a7955c/kaldifst-1.9.2-cp315-cp315-macosx_11_0_arm64.whl", hash = "sha256:1afa14104ead9f104f6598a3b3796f3dc7a01619ec3eb466222b21a20b961d86", size = 1196306, upload-time = "2026-11-21T11:36:08.755Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/fc/90bbdd0285df58a23eea2f1753f06220136bda582dbb3ebcb0e8e2c6b1eb/kaldifst-1.9.2-cp315-cp315-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1c1a5974204e746519daf7273033fc7b84d30d00620819235bdc532d8a95da6d", size = 1741479, upload-time = "2026-11-21T08:37:51.104Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/1f/1138f49e75a10d9a4f36f748c6221d9ab385a550ccd11213214e20e4d006/kaldifst-1.9.2-cp315-cp315-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:aefd66d1b3b9df0d15b4a3c87ffc18c7c20d3b4fdd481e9ab9cd4e98843c9cb8", size = 1865139, upload-time = "2026-11-21T08:36:19.479Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/e0/f561902432712b837a6fe361046db413396910749908d01ded194f9dd48a/kaldifst-1.9.2-cp315-cp315-manylinux_2_31_armv7l.whl", hash = "sha256:adb194c763700ee1ae8f706e7cf2837d002f5e2a24f753e20c8e3d3bb0b31815", size = 1423008, upload-time = "2026-11-21T08:40:02.37Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/50/e8e8f78c7a8348228b758ad2f85842925d0983caa416549ba65f3ec20cb7/kaldifst-1.9.2-cp315-cp315-win32.whl", hash = "sha256:518a5607deb4dc6fc7b9013758f0864974b78db131e5f154adbf30ef86d01d55", size = 1191539, upload-time = "2026-11-21T08:49:31.28Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/88/13c8b44be6575f0be5209cac9b407f014a58ccee4c2b05763254a2a5cfc3/kaldifst-1.9.2-cp315-cp315-win_amd64.whl", hash = "sha256:3bb2b66f8fdc5302af5fffb73ab3f70a3c19b8ff20e6f3866ce16bd3d3a68ad2", size = 1327864, upload-time = "2026-11-21T08:55:18.148Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/eb/c4ac3a2f53abaf83464868a9d6b9c36f545434d18eed3483ddf64676df8b/kaldifst-1.9.2-cp315-cp315-win_arm64.whl", hash = "sha256:d06f22d833d1d265c0cb9aea4bdfbf6739224ab6e7969259c7f54bccd1a51531", size = 1377275, upload-time = "2026-11-21T08:28:21.203Z" },
+]
+
+[[package]]
 name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -290,6 +346,49 @@ wheels = [
 ]
 
 [[package]]
+name = "piper-phonemize"
+version = "1.5.0"
+source = { registry = "https://k2-fsa.github.io/icefall/piper_phonemize.html" }
+wheels = [
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-macosx_10_14_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-macosx_11_0_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-manylinux_2_31_armv7l.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-win32.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-win_amd64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp311-cp311-win_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-macosx_10_14_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-macosx_11_0_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-manylinux_2_31_armv7l.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-win32.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-win_amd64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp312-cp312-win_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-macosx_10_14_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-macosx_11_0_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-manylinux_2_31_armv7l.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-win32.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-win_amd64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp313-cp313-win_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-android_24_arm64_v8a.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-android_24_armeabi_v7a.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-android_24_x86.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-android_24_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-macosx_10_14_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-macosx_11_0_arm64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-manylinux_2_31_armv7l.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-win32.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-win_amd64.whl" },
+    { url = "https://github.com/csukuangfj/piper-phonemize/releases/download/v1.5.0/piper_phonemize-1.5.0-cp314-cp314-win_arm64.whl" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.14.4"
 source = { registry = "https://pypi.org/simple" }
@@ -441,6 +540,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypinyin"
+version = "0.55.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/a4/784cf98c09e0dc22776b0d7d8a4a5b761218bcae4608c2416ce1e167c8af/pypinyin-0.55.0.tar.gz", hash = "sha256:b5711b3a0c6f76e67408ec6b2e3c4987a3a806b7c528076e7c7b86fcf0eaa66b", size = 839836, upload-time = "2025-07-20T12:01:50.657Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/7b/4cabc76fcc21c3c7d5c671d8783984d30ac9d3bb387c4ba784fca3cdfa3a/pypinyin-0.55.0-py2.py3-none-any.whl", hash = "sha256:d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f", size = 840203, upload-time = "2025-07-20T12:01:48.535Z" },
+]
+
+[[package]]
 name = "sherpa-onnx"
 version = "2.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -539,8 +647,11 @@ dependencies = [
     { name = "anyio" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "kaldifst" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "piper-phonemize" },
+    { name = "pypinyin" },
     { name = "sherpa-onnx" },
     { name = "uvicorn" },
     { name = "websockets" },
@@ -551,7 +662,10 @@ requires-dist = [
     { name = "anyio", specifier = ">=4,<5" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "kaldifst", specifier = ">=1.9,<2" },
     { name = "numpy", specifier = ">=2,<3" },
+    { name = "piper-phonemize", specifier = "==1.5.0", index = "https://k2-fsa.github.io/icefall/piper_phonemize.html" },
+    { name = "pypinyin", specifier = ">=0.55,<1" },
     { name = "sherpa-onnx", specifier = "==2.0.3" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
     { name = "websockets", specifier = ">=15,<17" },
