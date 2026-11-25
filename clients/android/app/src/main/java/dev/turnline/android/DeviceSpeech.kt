@@ -184,30 +184,61 @@ class DeviceSpeech(private val context: Context) {
         }
     }
 
-    fun speak(text: String, settings: ServiceSettings, finished: (String?) -> Unit) {
+    fun speak(
+        text: String,
+        settings: ServiceSettings,
+        onPhraseStart: (String) -> Unit = {},
+        onPhraseDone: (String) -> Unit = {},
+        finished: (String?) -> Unit
+    ) {
+        val handle = beginSpeechStream(settings, onPhraseStart, onPhraseDone, finished) ?: return
+        speechChunks(text).forEach { enqueueSpeechPhrase(handle, it) }
+        sealSpeechStream(handle)
+    }
+
+    fun beginSpeechStream(
+        settings: ServiceSettings,
+        onPhraseStart: (String) -> Unit = {},
+        onPhraseDone: (String) -> Unit = {},
+        finished: (String?) -> Unit
+    ): Long? {
         stopSpeaking()
         val id = ++nextPlayback
-        val current = Playback(id, text, settings.language, settings.speechOutput, finished)
+        val current = Playback(
+            id = id,
+            language = settings.language,
+            output = settings.speechOutput,
+            rate = settings.speechRate.value,
+            onPhraseStart = onPhraseStart,
+            onPhraseDone = onPhraseDone,
+            finished = finished
+        )
         playback = current
         if (current.output == SpeechOutput.MATCHA) {
             try {
-                val attributes = requestPlaybackFocus(current) ?: return
+                val attributes = requestPlaybackFocus(current) ?: return null
                 setPlaybackLimit(current, 45_000L)
-                matcha.play(speechChunks(text), attributes) { error ->
-                    main.post { finishPlayback(id, error) }
-                }
+                current.matchaSession = matcha.startStream(
+                    attributes = attributes,
+                    speed = current.rate,
+                    onChunkStart = { phrase -> main.post { if (playback?.id == id) onPhraseStart(phrase) } },
+                    onChunkDone = { phrase -> main.post { if (playback?.id == id) onPhraseDone(phrase) } },
+                    finished = { error -> main.post { finishPlayback(id, error) } }
+                )
             } catch (_: RuntimeException) {
                 finishPlayback(id, "Matcha 播报失败。")
+                return null
             }
-            return
+            return id
         }
+
         val watchdog = Runnable {
             if (playback?.id == id && !engineReady) finishPlayback(id, "系统播报服务启动超时。")
         }
         current.watchdog = watchdog
         main.postDelayed(watchdog, 8_000)
         when {
-            engineReady -> startPlayback()
+            engineReady -> prepareSystemPlayback(current)
             engine == null -> {
                 val epoch = ++engineEpoch
                 try {
@@ -215,28 +246,127 @@ class DeviceSpeech(private val context: Context) {
                         main.post {
                             if (engine == null || epoch != engineEpoch) return@post
                             engineReady = status == TextToSpeech.SUCCESS
-                            if (engineReady) startPlayback()
-                            else {
-                                val pending = playback?.takeIf { it.output == SpeechOutput.SYSTEM }
-                                if (pending == null) shutdownEngine()
-                                else finishPlayback(pending.id, "设备没有可用的系统播报服务。")
+                            val active = playback?.takeIf { it.output == SpeechOutput.SYSTEM }
+                            if (engineReady) {
+                                active?.let(::prepareSystemPlayback)
+                            } else {
+                                if (active == null) shutdownEngine()
+                                else finishPlayback(active.id, "设备没有可用的系统播报服务。")
                             }
                         }
                     }
                 } catch (_: RuntimeException) {
                     finishPlayback(id, "无法启动系统播报服务。")
+                    return null
                 }
             }
         }
+        return id
     }
 
-    private fun startPlayback() {
-        val current = playback?.takeIf { it.output == SpeechOutput.SYSTEM } ?: return
+    fun enqueueSpeechPhrase(streamId: Long, rawPhrase: String) {
+        val current = playback?.takeIf { it.id == streamId && !it.sealed } ?: return
+        val spoken = speakableText(rawPhrase)
+        if (spoken.none { it.isLetterOrDigit() }) return
+        current.totalChars += spoken.length
+        setPlaybackLimit(current, if (current.output == SpeechOutput.MATCHA) 45_000L else 15_000L)
+        if (current.output == SpeechOutput.MATCHA) {
+            current.matchaSession?.enqueue(spoken)
+            return
+        }
+        if (current.systemReady) {
+            val tts = engine ?: return
+            enqueueSystemChunk(tts, current, spoken)
+        } else {
+            current.pendingChunks += spoken
+        }
+    }
+
+    fun sealSpeechStream(streamId: Long) {
+        val current = playback?.takeIf { it.id == streamId && !it.sealed } ?: return
+        current.sealed = true
+        if (current.output == SpeechOutput.MATCHA) {
+            current.matchaSession?.seal()
+            return
+        }
+        if (current.systemReady && current.inFlightUtterances == 0) {
+            finishPlayback(current.id, null)
+        }
+    }
+
+    private fun prepareSystemPlayback(current: Playback) {
+        if (playback?.id != current.id || current.systemReady) return
         val tts = engine ?: return
         current.watchdog?.let(main::removeCallbacks)
+        val attributes = requestPlaybackFocus(current) ?: return
         try {
-            enqueueSpeech(tts, current)
+            tts.setAudioAttributes(attributes)
+            tts.setSpeechRate(current.rate)
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    val phrase = utteranceId?.let { current.utteranceText[it] } ?: return
+                    main.post {
+                        if (playback?.id == current.id) current.onPhraseStart(phrase)
+                    }
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId?.startsWith("${current.id}:") != true) return
+                    main.post {
+                        if (playback?.id != current.id) return@post
+                        current.utteranceText.remove(utteranceId)?.let(current.onPhraseDone)
+                        current.inFlightUtterances = (current.inFlightUtterances - 1).coerceAtLeast(0)
+                        if (current.sealed && current.inFlightUtterances == 0) {
+                            finishPlayback(current.id, null)
+                        }
+                    }
+                }
+
+                @Deprecated("Required by the Android listener")
+                override fun onError(utteranceId: String?) {
+                    if (utteranceId?.startsWith("${current.id}:") == true) {
+                        main.post { finishPlayback(current.id, "系统播报失败。") }
+                    }
+                }
+            })
+            current.systemReady = true
+            setPlaybackLimit(current, 15_000L)
+            val queued = current.pendingChunks.toList()
+            current.pendingChunks.clear()
+            for (chunk in queued) {
+                if (playback?.id != current.id) return
+                enqueueSystemChunk(tts, current, chunk)
+            }
+            if (current.sealed && current.inFlightUtterances == 0 && playback?.id == current.id) {
+                finishPlayback(current.id, null)
+            }
         } catch (_: RuntimeException) {
+            finishPlayback(current.id, "系统播报失败。")
+        }
+    }
+
+    private fun enqueueSystemChunk(tts: TextToSpeech, current: Playback, chunk: String) {
+        if (!current.voiceConfigured) {
+            val locale = voiceLocale(chunk, current.language)
+            val localVoice = tts.voices.orEmpty().filter {
+                it.locale.language == locale.language && !it.isNetworkConnectionRequired &&
+                    TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features
+            }.maxByOrNull { it.quality + if (it.locale.country == locale.country) 1000 else 0 }
+            val languageAvailable = if (localVoice != null && tts.setVoice(localVoice) == TextToSpeech.SUCCESS) {
+                true
+            } else {
+                tts.setLanguage(locale) >= TextToSpeech.LANG_AVAILABLE
+            }
+            if (!languageAvailable) {
+                finishPlayback(current.id, "设备缺少该语言的播报语音。请在系统文字转语音设置中安装。")
+                return
+            }
+            current.voiceConfigured = true
+        }
+        val utteranceId = "${current.id}:${current.nextUtteranceIndex++}"
+        current.utteranceText[utteranceId] = chunk
+        current.inFlightUtterances++
+        if (tts.speak(chunk, TextToSpeech.QUEUE_ADD, null, utteranceId) == TextToSpeech.ERROR) {
             finishPlayback(current.id, "系统播报失败。")
         }
     }
@@ -258,52 +388,11 @@ class DeviceSpeech(private val context: Context) {
         return attributes
     }
 
-    private fun enqueueSpeech(tts: TextToSpeech, current: Playback) {
-        val attributes = requestPlaybackFocus(current) ?: return
-        val locale = voiceLocale(current.text, current.language)
-        val localVoice = tts.voices.orEmpty().filter {
-            it.locale.language == locale.language && !it.isNetworkConnectionRequired &&
-                TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features
-        }.maxByOrNull { it.quality + if (it.locale.country == locale.country) 1000 else 0 }
-        val languageAvailable = if (localVoice != null && tts.setVoice(localVoice) == TextToSpeech.SUCCESS) {
-            true
-        } else {
-            tts.setLanguage(locale) >= TextToSpeech.LANG_AVAILABLE
-        }
-        if (!languageAvailable) {
-            finishPlayback(current.id, "设备缺少该语言的播报语音。请在系统文字转语音设置中安装。")
-            return
-        }
-
-        val chunks = speechChunks(current.text)
-        val last = "${current.id}:${chunks.lastIndex}"
-        setPlaybackLimit(current, 15_000L)
-        tts.setAudioAttributes(attributes)
-        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
-            override fun onDone(utteranceId: String?) {
-                if (utteranceId == last) main.post { finishPlayback(current.id, null) }
-            }
-
-            @Deprecated("Required by the Android listener")
-            override fun onError(utteranceId: String?) {
-                if (utteranceId?.startsWith("${current.id}:") == true) {
-                    main.post { finishPlayback(current.id, "系统播报失败。") }
-                }
-            }
-        })
-        for ((i, chunk) in chunks.withIndex()) {
-            if (tts.speak(chunk, TextToSpeech.QUEUE_ADD, null, "${current.id}:$i") == TextToSpeech.ERROR) {
-                finishPlayback(current.id, "系统播报失败。")
-                break
-            }
-        }
-    }
-
     private fun setPlaybackLimit(current: Playback, startupMs: Long) {
+        current.limit?.let(main::removeCallbacks)
         val limit = Runnable { finishPlayback(current.id, "播报用时过长，已停止。") }
         current.limit = limit
-        main.postDelayed(limit, (startupMs + current.text.length * 180L).coerceAtMost(600_000L))
+        main.postDelayed(limit, (startupMs + current.totalChars * 180L).coerceAtMost(600_000L))
     }
 
     private fun finishPlayback(id: Long, error: String?) {
@@ -344,12 +433,23 @@ class DeviceSpeech(private val context: Context) {
 
     private data class Playback(
         val id: Long,
-        val text: String,
         val language: SpeechLanguage,
         val output: SpeechOutput,
+        val rate: Float,
+        val onPhraseStart: (String) -> Unit,
+        val onPhraseDone: (String) -> Unit,
         val finished: (String?) -> Unit,
         var watchdog: Runnable? = null,
-        var limit: Runnable? = null
+        var limit: Runnable? = null,
+        var matchaSession: MatchaSpeech.StreamSession? = null,
+        var systemReady: Boolean = false,
+        var voiceConfigured: Boolean = false,
+        var sealed: Boolean = false,
+        var nextUtteranceIndex: Int = 0,
+        var inFlightUtterances: Int = 0,
+        var totalChars: Int = 0,
+        val pendingChunks: MutableList<String> = mutableListOf(),
+        val utteranceText: MutableMap<String, String> = mutableMapOf()
     )
 }
 
@@ -364,13 +464,46 @@ private fun voiceLocale(text: String, language: SpeechLanguage): Locale {
     }
 }
 
-internal fun speakableText(text: String): String = replyBlocks(text)
-    .filterNot { it.code }.joinToString("\n") { it.text }
-    .replace(Regex("!\\[[^]]*]\\([^)]+\\)"), "")
-    .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1")
-    .replace(Regex("https?://[^\\s，。！？]+"), "")
-    .replace(Regex("(?m)^\\s*(?:#{1,6} |[-*+] |>|\\d+\\. )"), "")
-    .replace(Regex("[`*_~]"), "").trim().take(12_000)
+private val HAN_RUN = Regex("[\\u3400-\\u9FFF]+")
+private val LATIN_CHAR = Regex("[A-Za-z]")
+private val IMAGE_MARKDOWN = Regex("!\\[[^]]*]\\([^)]+\\)")
+private val LINK_MARKDOWN = Regex("\\[([^]]+)]\\([^)]+\\)")
+private val URL_PATTERN = Regex("https?://[^\\s，。！？]+")
+private val BLOCK_PREFIX = Regex("(?m)^\\s*(?:#{1,6} |[-*+] |>|\\d+\\. )")
+private val PERCENT_PATTERN = Regex("([+-]?\\d+(?:\\.\\d+)?)\\s*[%％]")
+private val STORAGE_UNIT = Regex("(\\d+(?:\\.\\d+)?)\\s*(TB|GB|MB|KB)\\b", RegexOption.IGNORE_CASE)
+private val HOME_DOT_PATH = Regex("~/\\.([a-z][a-z\\d-]*)(?![\\w/-])", RegexOption.IGNORE_CASE)
+private val CSHARP_PATTERN = Regex("(?<![A-Za-z0-9])C#(?![A-Za-z0-9#])")
+private val UNDERSCORE_JOIN = Regex("(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])")
+private val QUOTE_JOIN = Regex("(?<=[A-Za-z0-9])[\"“”]+(?=[A-Za-z0-9])")
+private val STRIP_SYMBOLS = Regex("[`*#~_《》\"“”]")
+
+internal fun speakableText(text: String): String {
+    val chinese = HAN_RUN.containsMatchIn(text) || !LATIN_CHAR.containsMatchIn(text)
+    val units = if (chinese) {
+        mapOf("TB" to "太字节", "GB" to "吉字节", "MB" to "兆字节", "KB" to "千字节")
+    } else {
+        mapOf("TB" to " terabytes", "GB" to " gigabytes", "MB" to " megabytes", "KB" to " kilobytes")
+    }
+    var cleaned = replyBlocks(text).filterNot { it.code }.joinToString("\n") { it.text }
+    cleaned = IMAGE_MARKDOWN.replace(cleaned, "")
+    cleaned = LINK_MARKDOWN.replace(cleaned, "$1")
+    cleaned = URL_PATTERN.replace(cleaned, "")
+    cleaned = BLOCK_PREFIX.replace(cleaned, "")
+    cleaned = PERCENT_PATTERN.replace(cleaned) { match ->
+        if (chinese) "百分之${match.groupValues[1]}" else "${match.groupValues[1]} percent"
+    }
+    cleaned = STORAGE_UNIT.replace(cleaned) { match ->
+        match.groupValues[1] + (units[match.groupValues[2].uppercase(Locale.ROOT)] ?: match.groupValues[2])
+    }
+    cleaned = HOME_DOT_PATH.replace(cleaned) { match ->
+        if (chinese) "家目录的点 ${match.groupValues[1]}" else "home directory dot ${match.groupValues[1]}"
+    }
+    cleaned = CSHARP_PATTERN.replace(cleaned, "C sharp")
+    cleaned = UNDERSCORE_JOIN.replace(cleaned, " ")
+    cleaned = QUOTE_JOIN.replace(cleaned, " ")
+    return STRIP_SYMBOLS.replace(cleaned, "").trim().take(12_000)
+}
 
 internal fun speechChunks(text: String): List<String> = buildList {
     var remaining = text.trim()

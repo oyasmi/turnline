@@ -15,7 +15,7 @@ import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db", null, 1) {
+class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db", null, 2) {
     private val prefs = context.getSharedPreferences("turnline", Context.MODE_PRIVATE)
     private val vault = KeyVault()
 
@@ -48,6 +48,7 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
                 text TEXT NOT NULL,
                 delivery TEXT NOT NULL,
                 remote_id TEXT,
+                created_at INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(thread, remote_id)
             )
         """.trimIndent())
@@ -55,7 +56,9 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        error("Missing database migration from $oldVersion to $newVersion")
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     fun settings(): ServiceSettings? {
@@ -74,7 +77,14 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
             language = SpeechLanguage.valueOf(prefs.getString("language", SpeechLanguage.CHINESE.name)!!),
             recognitionSource = recognitionSource,
             speechOutput = SpeechOutput.entries.find { it.name == prefs.getString("speech_output", null) }
-                ?: SpeechOutput.SYSTEM
+                ?: SpeechOutput.SYSTEM,
+            readingMode = ReadingMode.entries.find { it.name == prefs.getString("reading_mode", null) }
+                ?: ReadingMode.LIVE,
+            speechRate = SpeechRate.entries.find { it.name == prefs.getString("speech_rate", null) }
+                ?: SpeechRate.NORMAL,
+            customInstructions = prefs.getString("custom_instructions", "").orEmpty().take(MAX_CUSTOM_INSTRUCTIONS),
+            themeMode = ThemeMode.entries.find { it.name == prefs.getString("theme_mode", null) }
+                ?: ThemeMode.SYSTEM
         )
     }
 
@@ -82,7 +92,12 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
         val editor = prefs.edit().putString("provider", settings.provider.name)
             .putString("url", settings.url.toString()).putString("model", settings.model)
             .putString("language", settings.language.name).putString("recognition_source", settings.recognitionSource.name)
-            .putString("speech_output", settings.speechOutput.name).remove("local_recognition")
+            .putString("speech_output", settings.speechOutput.name)
+            .putString("reading_mode", settings.readingMode.name)
+            .putString("speech_rate", settings.speechRate.name)
+            .putString("custom_instructions", settings.customInstructions.take(MAX_CUSTOM_INSTRUCTIONS))
+            .putString("theme_mode", settings.themeMode.name)
+            .remove("local_recognition")
         if (settings.key.isEmpty()) editor.remove("credential")
         else editor.putString("credential", vault.encrypt(settings.key))
         check(editor.commit())
@@ -119,7 +134,7 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
 
     fun messages(thread: String): List<Message> = readableDatabase.rawQuery(
         """
-        SELECT id, role, text, delivery, remote_id FROM (
+        SELECT id, role, text, delivery, remote_id, created_at FROM (
             SELECT * FROM messages WHERE thread = ? ORDER BY sequence DESC LIMIT $TRANSCRIPT_LIMIT
         ) ORDER BY sequence ASC
         """.trimIndent(), arrayOf(thread)
@@ -127,7 +142,8 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
         buildList {
             while (cursor.moveToNext()) add(Message(
                 id = cursor.getString(0), role = Role.valueOf(cursor.getString(1)), text = cursor.getString(2),
-                delivery = Delivery.valueOf(cursor.getString(3)), remoteId = cursor.optionalString(4)
+                delivery = Delivery.valueOf(cursor.getString(3)), remoteId = cursor.optionalString(4),
+                timestamp = cursor.getLong(5)
             ))
         }
     }
@@ -154,8 +170,9 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
         answers.forEach { insert(db, thread, it) }
     }
 
-    fun applyPage(thread: String, page: ConversationPage) = transaction { db ->
-        var arrived = false
+    fun applyPage(thread: String, page: ConversationPage): List<Output> = transaction { db ->
+        val arrived = mutableListOf<Output>()
+        val now = System.currentTimeMillis()
         for (answer in page.messages) {
             val remoteId = answer.id ?: continue
             val existing = db.rawQuery("SELECT id, delivery FROM messages WHERE thread = ? AND remote_id = ?",
@@ -164,7 +181,7 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
             }
             if (existing?.second == Delivery.COMPLETE.name) continue
             val message = Message(id = existing?.first ?: java.util.UUID.randomUUID().toString(),
-                role = Role.ASSISTANT, text = answer.text, remoteId = remoteId)
+                role = Role.ASSISTANT, text = answer.text, remoteId = remoteId, timestamp = now)
             if (existing == null) {
                 insert(db, thread, message)
             } else {
@@ -173,10 +190,11 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
                     put("delivery", Delivery.COMPLETE.name)
                 }, "id = ?", arrayOf(message.id))
             }
-            arrived = true
+            arrived += answer
         }
         db.update("conversations", ContentValues().apply { put("cursor", page.cursor) }, "id = ?", arrayOf(thread))
-        if (arrived) touch(db, thread, System.currentTimeMillis())
+        if (arrived.isNotEmpty()) touch(db, thread, now)
+        arrived
     }
 
     fun delete(thread: String) {
@@ -191,6 +209,7 @@ class TurnlineStore(context: Context) : SQLiteOpenHelper(context, "turnline.db",
             put("text", message.text)
             put("delivery", message.delivery.name)
             put("remote_id", message.remoteId)
+            put("created_at", message.timestamp)
         })
     }
 

@@ -46,13 +46,18 @@ private val Dark = darkColorScheme(
 )
 
 @Composable
-fun TurnlineTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) Dark else Light, content = content)
+fun TurnlineTheme(mode: ThemeMode = ThemeMode.SYSTEM, content: @Composable () -> Unit) {
+    val dark = when (mode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+    MaterialTheme(colorScheme = if (dark) Dark else Light, content = content)
 }
 
 enum class Glyph {
     WAVE, MIC, SEND, STOP, PAUSE, END, HISTORY, SETTINGS, ADD, BACK, DOWN, SPEAKER, LINK, COPY,
-    CHECK, CLOSE, EYE, EYE_OFF, TRASH
+    CHECK, CLOSE, EYE, EYE_OFF, TRASH, RETRY
 }
 
 @Composable
@@ -173,6 +178,10 @@ fun LineIcon(glyph: Glyph, tint: Color, modifier: Modifier = Modifier.size(22.dp
                 line(3.5f, 7f, 20.5f, 7f)
                 line(10f, 11f, 10f, 17f)
                 line(14f, 11f, 14f, 17f)
+            }
+            Glyph.RETRY -> {
+                arc(4f, 4f, 16f, 16f, 35f, 290f)
+                trace(15 to 4, 20 to 5, 19 to 10)
             }
         }
     }

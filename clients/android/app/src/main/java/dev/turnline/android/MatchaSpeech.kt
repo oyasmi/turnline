@@ -9,8 +9,10 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsMatchaModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import kotlin.math.abs
 
 internal class MatchaSpeech(context: Context) {
@@ -24,14 +26,33 @@ internal class MatchaSpeech(context: Context) {
         assets.open("$MODEL/english-words.txt").bufferedReader().useLines { it.toHashSet() }
     }
 
-    fun play(chunks: List<String>, attributes: AudioAttributes, finished: (String?) -> Unit) {
+    fun play(
+        chunks: List<String>,
+        attributes: AudioAttributes,
+        speed: Float = 1.07f,
+        onChunkStart: (String) -> Unit = {},
+        onChunkDone: (String) -> Unit = {},
+        finished: (String?) -> Unit
+    ) {
+        val stream = startStream(attributes, speed, onChunkStart, onChunkDone, finished)
+        chunks.forEach(stream::enqueue)
+        stream.seal()
+    }
+
+    fun startStream(
+        attributes: AudioAttributes,
+        speed: Float = 1.07f,
+        onChunkStart: (String) -> Unit = {},
+        onChunkDone: (String) -> Unit = {},
+        finished: (String?) -> Unit
+    ): StreamSession {
         stop()
         val playback = Playback()
         current = playback
         worker.execute {
             if (playback.cancelled) return@execute
             val error = try {
-                synthesize(playback, chunks, attributes)
+                synthesizeStream(playback, attributes, speed, onChunkStart, onChunkDone)
                 null
             } catch (error: Exception) {
                 reportFailure(error)
@@ -40,6 +61,7 @@ internal class MatchaSpeech(context: Context) {
             }
             if (!playback.cancelled) finished(error)
         }
+        return StreamSession(playback)
     }
 
     fun stop() {
@@ -53,20 +75,28 @@ internal class MatchaSpeech(context: Context) {
         worker.shutdown()
     }
 
-    private fun synthesize(playback: Playback, chunks: List<String>, attributes: AudioAttributes) {
+    private fun synthesizeStream(
+        playback: Playback,
+        attributes: AudioAttributes,
+        speed: Float,
+        onChunkStart: (String) -> Unit,
+        onChunkDone: (String) -> Unit
+    ) {
         val voice = model ?: createModel().also { model = it }
         if (playback.cancelled) return
         val track = playback.open(voice.sampleRate(), attributes) ?: return
         try {
             var framesWritten = 0L
-            for (chunk in chunks) {
+            while (!playback.cancelled) {
+                val entry = playback.nextItem()
+                if (entry is StreamItem.End) break
+                val chunk = (entry as StreamItem.Chunk).text
                 if (playback.cancelled) return
-                val text = if (WORD.containsMatchIn(chunk) || NUMBER.containsMatchIn(chunk)) {
-                    matchaText(chunk, englishWords)
-                } else chunk
+                onChunkStart(chunk)
+                val text = matchaText(chunk, englishWords)
                 // Keep any playback exception on the Kotlin side of the JNI call.
                 var error: Exception? = null
-                voice.generateWithCallback(text, speed = 1.07f, callback = AudioCallback { samples ->
+                voice.generateWithCallback(text, speed = speed, callback = AudioCallback { samples ->
                     try {
                         if (!playback.cancelled && samples.isNotEmpty()) {
                             check(samples.all(Float::isFinite)) { "Invalid Matcha audio samples" }
@@ -81,9 +111,10 @@ internal class MatchaSpeech(context: Context) {
                     }
                 })
                 error?.let { throw it }
+                if (!playback.cancelled) onChunkDone(chunk)
             }
             if (playback.cancelled) return
-            check(framesWritten > 0) { "Matcha produced no audio" }
+            if (framesWritten == 0L) return
             while (!playback.cancelled && track.playbackHeadPosition.toUInt().toLong() < framesWritten) {
                 Thread.sleep(10)
             }
@@ -111,14 +142,35 @@ internal class MatchaSpeech(context: Context) {
         return "Matcha 播报失败。请重试或切换到系统播报。"
     }
 
+    internal class StreamSession(private val playback: Playback) {
+        fun enqueue(chunk: String) = playback.enqueue(chunk)
+        fun seal() = playback.seal()
+    }
+
+    internal sealed interface StreamItem {
+        data class Chunk(val text: String) : StreamItem
+        data object End : StreamItem
+    }
+
     private class AudioCallback(val write: (FloatArray) -> Int) : (FloatArray) -> Int {
         override fun invoke(samples: FloatArray): Int = write(samples)
     }
 
-    private class Playback {
+    internal class Playback {
         @Volatile var cancelled = false
             private set
+        private val queue = LinkedBlockingQueue<StreamItem>()
         private var track: AudioTrack? = null
+
+        fun enqueue(chunk: String) {
+            if (!cancelled && chunk.isNotBlank()) queue.offer(StreamItem.Chunk(chunk))
+        }
+
+        fun seal() {
+            queue.offer(StreamItem.End)
+        }
+
+        fun nextItem(): StreamItem = queue.take()
 
         @Synchronized
         fun open(sampleRate: Int, attributes: AudioAttributes): AudioTrack? {
@@ -159,6 +211,8 @@ internal class MatchaSpeech(context: Context) {
         @Synchronized
         fun cancel() {
             cancelled = true
+            queue.clear()
+            queue.offer(StreamItem.End)
             track?.let { output ->
                 runCatching { output.pause() }
                 runCatching { output.flush() }
@@ -179,8 +233,18 @@ internal class MatchaSpeech(context: Context) {
 
 // Matcha uses a lexicon and skips English words it cannot look up.
 internal fun matchaText(text: String, englishWords: Set<String>): String {
-    val hasHan = text.codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
-    val normalized = if (hasHan) text else NUMBER.replace(text) { match ->
+    var prepared = FULLWIDTH_CODE.replace(Normalizer.normalize(text, Normalizer.Form.NFC)) { match ->
+        Normalizer.normalize(match.value, Normalizer.Form.NFKC)
+    }
+    prepared = COLON_PAUSE.replace(prepared.replace('：', ':'), "，")
+    prepared = CODE_TOKEN.replace(prepared, ::expandModelCode)
+
+    val hasHan = prepared.codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
+    if (hasHan) {
+        prepared = CLOCK_TIME.replace(prepared) { "${it.groupValues[1]}点${it.groupValues[2]}分" }
+    }
+
+    val normalized = if (hasHan) prepared else NUMBER.replace(prepared) { match ->
         val (sign, whole, fraction) = match.destructured
         val signed = when (sign) {
             "-" -> "minus "
@@ -202,6 +266,19 @@ internal fun matchaText(text: String, englishWords: Set<String>): String {
     }
 }
 
+private fun expandModelCode(match: MatchResult): String {
+    val token = match.value
+    val parts = CODE_PART.findAll(token).map { it.value }.toList()
+    val hasLetters = parts.any { it.first().isLetter() }
+    val hasDigits = parts.any { it.first().isDigit() }
+    if (!hasLetters || !hasDigits) return token
+    return parts.flatMap { part ->
+        if (part.first().isDigit()) {
+            part.map { ch -> if (ch == '.') "point" else UNITS[ch.digitToInt()] }
+        } else listOf(part)
+    }.joinToString(" ")
+}
+
 private fun spellDigits(digits: String) = digits.map { UNITS[it.digitToInt()] }.joinToString(" ")
 
 private fun spellInteger(number: Int): String = when {
@@ -214,6 +291,11 @@ private fun spellInteger(number: Int): String = when {
     }
 }
 
+private val FULLWIDTH_CODE = Regex("[Ａ-Ｚａ-ｚ０-９]+")
+private val COLON_PAUSE = Regex("(?<![0-9]):|:(?![0-9])")
+private val CLOCK_TIME = Regex("(?<![0-9:])([01]?[0-9]|2[0-3]):([0-5][0-9])(?![0-9:])")
+private val CODE_TOKEN = Regex("[A-Za-z0-9]+(?:[._\\-‐‑–][A-Za-z0-9]+)*")
+private val CODE_PART = Regex("[A-Za-z]+|[0-9]+(?:\\.[0-9]+)*")
 private val NUMBER = Regex("(?<![\\p{L}\\p{N}_.])([+-]?)([0-9]+)(?:\\.([0-9]+))?(?![\\p{L}\\p{N}_]|\\.[0-9])")
 private val WORD = Regex("[A-Za-z]+(?:['’\\-][A-Za-z]+)*")
 private val UNITS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen " +

@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -22,13 +23,40 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
-class ApiFailure(message: String, val status: Int? = null) : IOException(message)
+class ApiFailure(
+    message: String,
+    val status: Int? = null,
+    val retryAfter: Int? = null
+) : IOException(message)
 
-data class ResponseDraft(val phase: String = "正在等待回复", val outputs: List<Output> = emptyList()) {
+data class ResponseDraft(
+    val phase: String = "正在等待回复",
+    val outputs: List<Output> = emptyList(),
+    val failureNotice: String? = null
+) {
     val text: String = outputs.joinToString("\n\n") { it.text }
 }
 
 data class ConversationPage(val messages: List<Output>, val cursor: String?, val hasMore: Boolean)
+
+private val TOOL_LABELS = mapOf(
+    "bash" to "正在执行命令",
+    "read" to "正在读取文件",
+    "write" to "正在写入文件",
+    "edit" to "正在编辑文件",
+    "grep" to "正在检索内容",
+    "glob" to "正在查找文件",
+    "find" to "正在查找文件",
+    "web_search" to "正在搜索网页",
+    "web_fetch" to "正在读取网页",
+    "memory_manage" to "正在检索记忆",
+    "session_search" to "正在搜索历史",
+    "subagent" to "正在委派子任务",
+    "event_manage" to "正在管理事件"
+)
+
+internal fun describeTool(name: String?): String =
+    if (name.isNullOrBlank()) "正在查询" else TOOL_LABELS[name] ?: "正在调用工具"
 
 class ResponsesClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
@@ -52,14 +80,54 @@ class ResponsesClient(
         } else {
             val body = JSONObject().put("model", settings.model).put("input", "Reply with only OK.")
                 .put("stream", true).put("store", false)
-            execute(request(settings, settings.url, body), 20) { readReply(it) {} }
+            execute(request(settings, settings.url, body), 20) { readReply(it, StreamState()) {} }
         }
     }
 
-    suspend fun createConversation(settings: ServiceSettings): String =
-        execute(request(settings, sibling(settings, "conversations"), JSONObject()), 15) { response ->
+    suspend fun createConversation(
+        settings: ServiceSettings,
+        metadata: Map<String, String>? = null
+    ): String {
+        val body = JSONObject()
+        if (!metadata.isNullOrEmpty()) {
+            body.put("metadata", JSONObject(metadata))
+        }
+        return execute(request(settings, sibling(settings, "conversations"), body), 15) { response ->
             readJson(response).string("id") ?: throw ApiFailure("服务没有返回会话 ID。")
         }
+    }
+
+    suspend fun updateConversationMetadata(
+        settings: ServiceSettings,
+        id: String,
+        metadata: Map<String, String>
+    ) {
+        if (metadata.isEmpty()) return
+        val body = JSONObject().put("metadata", JSONObject(metadata))
+        execute(request(settings, sibling(settings, "conversations", id), body), 10) { Unit }
+    }
+
+    suspend fun deleteConversation(settings: ServiceSettings, id: String) {
+        try {
+            execute(request(settings, sibling(settings, "conversations", id), method = "DELETE"), 10) { Unit }
+        } catch (error: ApiFailure) {
+            if (error.status == 404) return
+            throw error
+        }
+    }
+
+    suspend fun cancelResponse(settings: ServiceSettings, responseId: String) {
+        if (responseId.isBlank()) return
+        try {
+            execute(
+                request(settings, sibling(settings, "responses", responseId, "cancel"), JSONObject()),
+                8
+            ) { Unit }
+        } catch (error: ApiFailure) {
+            if (error.status == 400 || error.status == 404) return
+            throw error
+        }
+    }
 
     suspend fun items(settings: ServiceSettings, id: String, after: String?): ConversationPage {
         val url = sibling(settings, "conversations", id, "items").newBuilder()
@@ -91,11 +159,17 @@ class ResponsesClient(
         conversationId: String?,
         messages: List<Message>,
         voice: Boolean,
+        instructions: String? = null,
+        background: Boolean = conversationId != null,
+        onResponseCreated: ((String) -> Unit)? = null,
         onDraft: (ResponseDraft) -> Unit
     ): List<Output> {
         val body = JSONObject().put("model", settings.model).put("stream", true)
-        if (voice) body.put("instructions", VOICE_INSTRUCTIONS)
+        val resolvedInstructions = instructions?.takeIf { it.isNotBlank() }
+            ?: if (voice) VOICE_INSTRUCTIONS else null
+        if (resolvedInstructions != null) body.put("instructions", resolvedInstructions)
         if (conversationId != null) {
+            if (background) body.put("background", true)
             body.put("conversation", conversationId).put("input", messages.last().text)
         } else {
             val input = JSONArray()
@@ -104,19 +178,60 @@ class ResponsesClient(
             }
             body.put("store", false).put("input", input)
         }
-        return execute(request(settings, settings.url, body)) { response -> readReply(response, onDraft) }
+
+        val state = StreamState(onResponseCreated = onResponseCreated)
+        var initialError: ApiFailure? = null
+        try {
+            return execute(request(settings, settings.url, body)) { response ->
+                readReply(response, state, onDraft)
+            }
+        } catch (error: ApiFailure) {
+            if (!background || conversationId == null || error.status != null || !state.canResume()) {
+                throw error
+            }
+            initialError = error
+        }
+
+        var lastError: ApiFailure = initialError!!
+        for (delayMs in RESUME_BACKOFF_MS) {
+            delay(delayMs)
+            val responseId = state.responseId ?: break
+            val url = sibling(settings, "responses", responseId).newBuilder()
+                .addQueryParameter("stream", "true")
+                .apply { state.lastSequence?.let { addQueryParameter("starting_after", it.toString()) } }
+                .build()
+            try {
+                return execute(request(settings, url, acceptStream = true)) { response ->
+                    readReply(response, state, onDraft)
+                }
+            } catch (error: ApiFailure) {
+                lastError = error
+                if (error.status == 400 || error.status == 404) break
+            }
+        }
+        onDraft(state.draft())
+        throw lastError
     }
 
     private fun sibling(settings: ServiceSettings, vararg segments: String): HttpUrl =
         settings.url.newBuilder().removePathSegment(settings.url.pathSize - 1)
             .apply { segments.forEach { addPathSegment(it) } }.build()
 
-    private fun request(settings: ServiceSettings, url: HttpUrl, body: JSONObject? = null): Request =
+    private fun request(
+        settings: ServiceSettings,
+        url: HttpUrl,
+        body: JSONObject? = null,
+        method: String? = null,
+        acceptStream: Boolean = body != null
+    ): Request =
         Request.Builder().url(url)
-            .header("Accept", if (body == null) "application/json" else "text/event-stream, application/json")
+            .header("Accept", if (acceptStream) "text/event-stream, application/json" else "application/json")
             .apply {
                 if (settings.key.isNotEmpty()) header("Authorization", "Bearer ${settings.key}")
-                if (body != null) post(body.toString().toRequestBody("application/json".toMediaType()))
+                when {
+                    method != null -> method(method, body?.toString()?.toRequestBody("application/json".toMediaType()))
+                    body != null -> post(body.toString().toRequestBody("application/json".toMediaType()))
+                }
             }.build()
 
     private suspend fun <T> execute(
@@ -140,7 +255,8 @@ class ResponsesClient(
                         if (!it.isSuccessful) {
                             val error = runCatching { JSONObject(it.peekBody(8192).string()) }.getOrNull()
                             val detail = error?.optJSONObject("error")?.string("message")
-                            throw ApiFailure(httpError(it.code, detail), it.code)
+                            val retryAfter = it.header("Retry-After")?.trim()?.toIntOrNull()?.takeIf { s -> s > 0 }
+                            throw ApiFailure(httpError(it.code, detail, retryAfter), it.code, retryAfter)
                         }
                         read(it)
                     }
@@ -150,6 +266,10 @@ class ResponsesClient(
                 }
             }
         })
+    }
+
+    private companion object {
+        val RESUME_BACKOFF_MS = longArrayOf(600L, 1_500L, 3_000L)
     }
 }
 
@@ -163,11 +283,11 @@ private fun readJson(response: Response): JSONObject {
     return JSONObject(source.readUtf8())
 }
 
-private fun readReply(response: Response, onDraft: (ResponseDraft) -> Unit): List<Output> {
+private fun readReply(response: Response, state: StreamState, onDraft: (ResponseDraft) -> Unit): List<Output> {
     val body = response.body ?: throw ApiFailure("服务没有返回内容。")
     val result = when (body.contentType()?.subtype) {
         "event-stream" -> body.charStream().buffered().use { reader ->
-            assembleReply(reader, onDraft)
+            assembleReply(reader, state, onDraft)
         }
         "json" -> completedOutput(readJson(response)) { partial ->
             onDraft(ResponseDraft("正在生成回复", partial))
@@ -177,7 +297,10 @@ private fun readReply(response: Response, onDraft: (ResponseDraft) -> Unit): Lis
     return result.ifEmpty { throw ApiFailure("服务已完成请求，但没有返回可显示的文字。") }
 }
 
-private fun httpError(code: Int, detail: String?): String {
+private fun httpError(code: Int, detail: String?, retryAfter: Int? = null): String {
+    if (code == 429 && retryAfter != null) {
+        return "PipiClaw 正忙，请 $retryAfter 秒后重试。"
+    }
     val hint = when (code) {
         in 300..399 -> "服务要求重定向。请直接填写最终地址。"
         401, 403 -> "服务拒绝了连接。请检查 API 密钥和权限。"
@@ -193,7 +316,8 @@ private fun httpError(code: Int, detail: String?): String {
 private fun displayFailure(error: Exception, key: String): ApiFailure = when (error) {
     is ApiFailure -> ApiFailure(
         (error.message ?: "请求失败。").let { if (key.isBlank()) it else it.replace(key, "••••") }.take(480),
-        error.status
+        error.status,
+        error.retryAfter
     )
     is SSLException -> ApiFailure("无法验证 HTTPS 连接。请检查证书、地址和设备时间。")
     is UnknownHostException -> ApiFailure("找不到服务主机。请检查地址或网络。")
@@ -259,7 +383,7 @@ private fun responseFailure(payload: JSONObject): ApiFailure {
     return ApiFailure(if (detail == null) "服务未完成这次回复。" else "服务未完成这次回复。\n${detail.take(260)}")
 }
 
-private data class DraftItem(
+internal class DraftItem(
     var id: String? = null,
     var excluded: Boolean = false,
     var finished: Output? = null,
@@ -269,51 +393,112 @@ private data class DraftItem(
         .trim().takeIf(String::isNotEmpty)?.let { Output(id, it) }
 }
 
-/** One bounded SSE record at a time, including named events and CR/LF framing. */
-internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> Unit): List<Output> {
+internal class StreamState(
+    val onResponseCreated: ((String) -> Unit)? = null
+) {
     val output = sortedMapOf<Int, DraftItem>()
-    var lastUpdate = 0L
-    var phase = "正在等待回复"
-    var received = 0
+    val activeTools = linkedMapOf<Int, String>()
+    var phase: String = "正在等待回复"
+    var received: Int = 0
+    var responseId: String? = null
+    var lastSequence: Int? = null
+    var failureNotice: String? = null
+    var streamDisrupted: Boolean = false
 
-    fun collected() = boundedOutput(output.values.mapNotNull { it.output() })
+    fun collected(): List<Output> = boundedOutput(output.values.mapNotNull { it.output() })
+
+    fun draft(outputs: List<Output> = collected()): ResponseDraft =
+        ResponseDraft(phase, outputs, failureNotice)
+
+    fun canResume(): Boolean = streamDisrupted && responseId != null && lastSequence != null
+}
+
+/** One bounded SSE record at a time, including named events and CR/LF framing. */
+internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> Unit): List<Output> =
+    assembleReply(reader, StreamState(), onDraft)
+
+internal fun assembleReply(
+    reader: BufferedReader,
+    state: StreamState,
+    onDraft: (ResponseDraft) -> Unit
+): List<Output> {
+    var lastUpdate = 0L
+
     fun publish(force: Boolean = false) {
         val now = System.nanoTime()
         if (!force && now - lastUpdate < 45_000_000L) return
         lastUpdate = now
-        onDraft(ResponseDraft(phase, collected()))
+        onDraft(state.draft())
     }
 
     fun item(event: JSONObject): DraftItem {
         val index = event.optInt("output_index", 0)
         if (index !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的回复条目过多。")
-        return output.getOrPut(index, ::DraftItem).apply { id = event.string("item_id") ?: id }
+        return state.output.getOrPut(index, ::DraftItem).apply { id = event.string("item_id") ?: id }
     }
 
     var terminalPartial = emptyList<Output>()
+    state.streamDisrupted = false
     try {
         for ((named, data) in readEvents(reader)) {
-            if (data == "[DONE]") return collected()
+            if (data == "[DONE]") return state.collected()
             val event = JSONObject(data)
+            if (event.has("sequence_number") && !event.isNull("sequence_number")) {
+                val seq = event.optInt("sequence_number", -1)
+                if (seq >= 0) state.lastSequence = seq
+            }
             when (val type = event.string("type") ?: named) {
+                "response.created" -> {
+                    val createdId = event.optJSONObject("response")?.string("id")
+                    if (createdId != null) {
+                        state.responseId = createdId
+                        state.onResponseCreated?.invoke(createdId)
+                    }
+                    when (event.optJSONObject("response")?.string("status")) {
+                        "queued" -> {
+                            state.phase = "正在排队"
+                            publish(true)
+                        }
+                        "in_progress" -> {
+                            state.phase = "正在生成回复"
+                            publish(true)
+                        }
+                    }
+                }
                 "response.queued" -> {
-                    phase = "正在排队"
+                    state.phase = "正在排队"
                     publish(true)
                 }
                 "response.in_progress" -> {
-                    phase = "正在生成回复"
+                    state.phase = state.activeTools.values.lastOrNull() ?: "正在生成回复"
                     publish(true)
                 }
                 "response.output_item.added", "response.output_item.done" -> {
                     val detail = event.optJSONObject("item") ?: continue
+                    val index = event.optInt("output_index", 0)
+                    val itemType = detail.string("type")
                     val current = item(event)
                     current.id = detail.string("id") ?: current.id
-                    current.excluded = detail.string("type") != "message" ||
+                    current.excluded = itemType != "message" ||
                         detail.string("role") != "assistant" || detail.string("phase") == "commentary"
+                    if (itemType == "mcp_call" || itemType == "function_call") {
+                        if (type == "response.output_item.added") {
+                            state.activeTools[index] = describeTool(detail.string("name"))
+                        } else {
+                            state.activeTools.remove(index)
+                            if (itemType == "mcp_call" && detail.string("status") == "failed") {
+                                detail.string("pipiclaw_failure")?.let { state.failureNotice = it }
+                            }
+                        }
+                    }
                     if (type == "response.output_item.done") {
                         current.finished = assistantOutput(detail)
                     }
-                    phase = if (current.excluded) "正在处理" else "正在生成回复"
+                    state.phase = when {
+                        state.activeTools.isNotEmpty() -> state.activeTools.values.last()
+                        current.excluded -> "正在处理"
+                        else -> "正在生成回复"
+                    }
                     publish(true)
                 }
                 "response.output_text.delta", "response.refusal.delta",
@@ -326,14 +511,14 @@ internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> U
                     if (partIndex !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的内容条目过多。")
                     val part = current.parts.getOrPut(partIndex, ::StringBuilder)
                     if (done != null) {
-                        received -= part.length
+                        state.received -= part.length
                         part.clear()
                     }
                     val text = done ?: piece
-                    val count = minOf(text.length, MAX_OUTPUT - received)
+                    val count = minOf(text.length, MAX_OUTPUT - state.received)
                     part.append(text, 0, count)
-                    received += count
-                    phase = "正在生成回复"
+                    state.received += count
+                    state.phase = "正在生成回复"
                     if (count < text.length) throw ApiFailure("回复过长，已保留收到的文字。")
                     publish()
                 }
@@ -341,7 +526,7 @@ internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> U
                     val complete = event.optJSONObject("response")?.let { response ->
                         completedOutput(response) { terminalPartial = it }
                     }.orEmpty()
-                    return complete.ifEmpty(::collected)
+                    return complete.ifEmpty(state::collected)
                 }
                 "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error" -> {
                     val response = event.optJSONObject("response") ?: event
@@ -350,10 +535,14 @@ internal fun assembleReply(reader: BufferedReader, onDraft: (ResponseDraft) -> U
                 }
             }
         }
+        state.streamDisrupted = true
         throw ApiFailure("回复流提前断开，已保留收到的文字。")
     } catch (failure: Exception) {
+        if (failure is IOException && failure !is ApiFailure) {
+            state.streamDisrupted = true
+        }
         if (failure is IOException || failure is JSONException) {
-            onDraft(ResponseDraft(phase, terminalPartial.ifEmpty(::collected)))
+            onDraft(state.draft(terminalPartial.ifEmpty(state::collected)))
         }
         throw failure
     }

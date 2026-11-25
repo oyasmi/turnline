@@ -55,6 +55,20 @@ class ResponsesClientTest {
     }
 
     @Test
+    fun reportsToolLabelsAndMcpFailureNotice() {
+        val phases = mutableListOf<ResponseDraft>()
+        val wire =
+            event("response.output_item.added", """ "output_index":0,"item":{"id":"t1","type":"mcp_call","name":"web_search"} """) +
+            event("response.output_item.done", """ "output_index":0,"item":{"id":"t1","type":"mcp_call","name":"web_search","status":"failed","pipiclaw_failure":"搜索服务超时"} """) +
+            event("response.output_text.delta", """ "output_index":1,"item_id":"m1","delta":"已完成。" """) +
+            event("response.completed", """ "response":{"status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"已完成。"}]}]} """)
+        val result = assembleReply(wire.reader().buffered()) { phases += it }
+        assertEquals(listOf(Output("m1", "已完成。")), result)
+        assertTrue(phases.any { it.phase == "正在搜索网页" })
+        assertTrue(phases.any { it.failureNotice == "搜索服务超时" })
+    }
+
+    @Test
     fun malformedEventFlushesTheLatestTextWithEachRemoteItemId() {
         val wire =
             event("response.output_text.delta", """ "item_id":"m1","delta":"第一条" """) +
@@ -158,19 +172,78 @@ class ResponsesClientTest {
             val client = ResponsesClient()
             val settings = settings(server, Provider.PIPICLAW)
             client.check(settings)
-            val id = client.createConversation(settings)
+            val id = client.createConversation(settings, mapOf("source" to "turnline"))
             val result = client.respond(settings, id, listOf(Message(role = Role.USER, text = "你好")), false) {}
             val page = client.items(settings, id, "previous")
             assertEquals(listOf(Output("m1", "你好。")), result)
             assertEquals(ConversationPage(result, "m1", false), page)
             assertEquals("/gateway/v1/models/pipiclaw", server.takeRequest().path)
-            assertEquals("/gateway/v1/conversations", server.takeRequest().path)
+            val createdReq = server.takeRequest()
+            assertEquals("/gateway/v1/conversations", createdReq.path)
+            assertEquals("turnline", JSONObject(createdReq.body.readUtf8()).getJSONObject("metadata").getString("source"))
             val response = JSONObject(server.takeRequest().body.readUtf8())
             assertEquals("conv_one", response.getString("conversation"))
             assertEquals("你好", response.getString("input"))
+            assertTrue(response.getBoolean("background"))
             assertFalse(response.has("store"))
             assertEquals("/gateway/v1/conversations/conv_one/items?order=asc&limit=50&after=previous",
                 server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun resumesPipiclawBackgroundResponseAfterMidStreamDisconnect() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+                event("response.created", """ "sequence_number":0,"response":{"id":"resp_123","status":"in_progress"} """) +
+                    event("response.output_text.delta", """ "sequence_number":1,"output_index":0,"item_id":"m1","delta":"前半句，" """)
+            ))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+                event("response.output_text.delta", """ "sequence_number":2,"output_index":0,"item_id":"m1","delta":"后半句。" """) +
+                    event("response.completed", """ "sequence_number":3,"response":{"status":"completed","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"前半句，后半句。"}]}]} """)
+            ))
+            val client = ResponsesClient()
+            val settings = settings(server, Provider.PIPICLAW)
+            var createdId: String? = null
+            val result = client.respond(
+                settings = settings,
+                conversationId = "conv_one",
+                messages = listOf(Message(role = Role.USER, text = "继续")),
+                voice = false,
+                onResponseCreated = { createdId = it }
+            ) {}
+            assertEquals("resp_123", createdId)
+            assertEquals(listOf(Output("m1", "前半句，后半句。")), result)
+            assertEquals("/gateway/v1/responses", server.takeRequest().path)
+            assertEquals("/gateway/v1/responses/resp_123?stream=true&starting_after=1", server.takeRequest().path)
+        }
+    }
+
+    @Test
+    fun parsesRetryAfterAndSupportsCancelMetadataAndDelete() = runBlocking {
+        MockWebServer().use { server ->
+            val client = ResponsesClient()
+            val settings = settings(server, Provider.PIPICLAW)
+            server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "12"))
+            val error = runCatching { client.check(settings) }.exceptionOrNull() as ApiFailure
+            assertEquals(429, error.status)
+            assertEquals(12, error.retryAfter)
+            assertTrue(error.message!!.contains("12 秒"))
+
+            server.enqueue(json("""{"id":"resp_1","status":"cancelled"}"""))
+            server.enqueue(json("""{"id":"conv_1","metadata":{"title":"新标题"}}"""))
+            server.enqueue(MockResponse().setResponseCode(404))
+            client.cancelResponse(settings, "resp_1")
+            client.updateConversationMetadata(settings, "conv_1", mapOf("title" to "新标题"))
+            client.deleteConversation(settings, "conv_1")
+            server.takeRequest()
+            assertEquals("/gateway/v1/responses/resp_1/cancel", server.takeRequest().path)
+            val metaReq = server.takeRequest()
+            assertEquals("/gateway/v1/conversations/conv_1", metaReq.path)
+            assertEquals("新标题", JSONObject(metaReq.body.readUtf8()).getJSONObject("metadata").getString("title"))
+            val delReq = server.takeRequest()
+            assertEquals("DELETE", delReq.method)
+            assertEquals("/gateway/v1/conversations/conv_1", delReq.path)
         }
     }
 

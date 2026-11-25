@@ -86,6 +86,10 @@ fun SettingsScreen(
         mutableStateOf(configured?.recognitionSource ?: RecognitionSource.OFFLINE)
     }
     var speechOutput by rememberSaveable { mutableStateOf(configured?.speechOutput ?: SpeechOutput.SYSTEM) }
+    var readingMode by rememberSaveable { mutableStateOf(configured?.readingMode ?: ReadingMode.LIVE) }
+    var speechRate by rememberSaveable { mutableStateOf(configured?.speechRate ?: SpeechRate.NORMAL) }
+    var customInstructions by rememberSaveable { mutableStateOf(configured?.customInstructions.orEmpty()) }
+    var themeMode by rememberSaveable { mutableStateOf(configured?.themeMode ?: ThemeMode.SYSTEM) }
     var testing by remember { mutableStateOf(false) }
     var tested by remember { mutableStateOf<ServiceSettings?>(null) }
     var issue by remember { mutableStateOf<String?>(null) }
@@ -104,7 +108,19 @@ fun SettingsScreen(
         require(provider != Provider.PIPICLAW || key.isNotEmpty()) { "PipiClaw 的 HTTP 接口需要 API 密钥。" }
         val name = if (provider == Provider.PIPICLAW) "pipiclaw" else model.trim()
         require(name.isNotBlank()) { "请填写服务使用的模型 ID。" }
-        return ServiceSettings(provider, url, name, key, language, recognitionSource, speechOutput)
+        return ServiceSettings(
+            provider = provider,
+            url = url,
+            model = name,
+            key = key,
+            language = language,
+            recognitionSource = recognitionSource,
+            speechOutput = speechOutput,
+            readingMode = readingMode,
+            speechRate = speechRate,
+            customInstructions = customInstructions.trim().take(MAX_CUSTOM_INSTRUCTIONS),
+            themeMode = themeMode
+        )
     }
     fun checkForm(): ServiceSettings? = try {
         issue = null
@@ -162,7 +178,7 @@ fun SettingsScreen(
                         }
                     }
                     Text(
-                        if (provider == Provider.PIPICLAW) "使用 PipiClaw 会话，保留工位上下文和后台任务更新。"
+                        if (provider == Provider.PIPICLAW) "使用 PipiClaw 会话，支持断点续流、后台任务更新和跨端会话标题同步。"
                         else "通过 /responses 发送消息，由手机保留近期对话上下文。",
                         fontSize = 13.sp, lineHeight = 20.sp, color = colors.onSurfaceVariant
                     )
@@ -228,7 +244,50 @@ fun SettingsScreen(
                         Text("在手机上离线合成中文、英文和中英混读。",
                             color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
                     }
+                    Text("播报时机", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ReadingMode.entries.forEach { mode ->
+                            FilterChip(readingMode == mode, { readingMode = mode },
+                                label = { Text(mode.label) }, enabled = editable)
+                        }
+                    }
+                    Text(
+                        when (readingMode) {
+                            ReadingMode.LIVE -> "收到首句即开始播报，降低通话等待感。"
+                            ReadingMode.CONFIRMED -> "等待整轮回复完成后再开始播报。"
+                        },
+                        color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp
+                    )
+                    Text("播报语速", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SpeechRate.entries.forEach { rate ->
+                            FilterChip(speechRate == rate, { speechRate = rate },
+                                label = { Text(rate.label) }, enabled = editable)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = customInstructions,
+                        onValueChange = { if (it.length <= MAX_CUSTOM_INSTRUCTIONS) customInstructions = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("附加通话指令（可选）") },
+                        placeholder = { Text("例如：回答更精简、优先用英文术语") },
+                        shape = RoundedCornerShape(13.dp),
+                        minLines = 2,
+                        maxLines = 4,
+                        enabled = editable
+                    )
                 }
+
+                SettingsGroup("外观") {
+                    Text("主题模式", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ThemeMode.entries.forEach { mode ->
+                            FilterChip(themeMode == mode, { themeMode = mode },
+                                label = { Text(mode.label) }, enabled = editable)
+                        }
+                    }
+                }
+
                 if (provider == Provider.RESPONSES) {
                     Text("测试连接会向所选模型发送一次简短请求。",
                         Modifier.padding(horizontal = 3.dp), color = colors.onSurfaceVariant, fontSize = 12.sp)

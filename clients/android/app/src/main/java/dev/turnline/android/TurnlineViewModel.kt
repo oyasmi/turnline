@@ -1,6 +1,7 @@
 package dev.turnline.android
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.util.concurrent.atomic.AtomicReference
@@ -31,6 +32,7 @@ data class TurnlineState(
     val activeTurn: String? = null,
     val reachable: Boolean = false,
     val call: CallStage = CallStage.OFF,
+    val callStartedAt: Long? = null,
     val partialSpeech: String = "",
     val level: Float = 0f,
     val reading: String? = null,
@@ -57,6 +59,10 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     private var foreground = false
     private var callId = 0L
     private var silenceCount = 0
+    private var activeResponseId: String? = null
+    private var pendingInterruption: String = ""
+    private var activeSpokenPhrase: String? = null
+    private var lastCompletedPhrase: String? = null
 
     init {
         viewModelScope.launch {
@@ -99,6 +105,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     stopAudio()
                     pollJob?.cancelAndJoin()
                     turnJob?.cancelAndJoin()
+                    pendingInterruption = ""
                 }
                 val next = withContext(Dispatchers.IO) {
                     val restored = if (sameService) null else restored(settings)
@@ -136,6 +143,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         val scope = current.serviceScope ?: return
         if (current.loading || current.conversation.id == conversation.id) return
         stopAudio()
+        pendingInterruption = ""
         update { it.copy(loading = true, notice = null, recoverText = null) }
         viewModelScope.launch {
             try {
@@ -157,15 +165,22 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun deleteConversation(conversation: Conversation) {
+    fun deleteConversation(conversation: Conversation, deleteRemote: Boolean = false) {
         val scope = current.serviceScope ?: return
+        val settings = current.settings
         if (current.busy || current.loading) return
         val selected = current.conversation.id == conversation.id
-        if (selected) stopAudio()
+        if (selected) {
+            stopAudio()
+            pendingInterruption = ""
+        }
         update { it.copy(loading = true) }
         viewModelScope.launch {
             try {
                 pollJob?.cancelAndJoin()
+                if (deleteRemote && settings?.usesConversation == true && conversation.remoteId != null) {
+                    runCatching { api.deleteConversation(settings, conversation.remoteId) }
+                }
                 val recent = withContext(Dispatchers.IO) {
                     store.delete(conversation.id)
                     if (selected) store.rememberThread(scope, null)
@@ -185,6 +200,8 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun retryLastTurn(): Boolean = send("请重新回答上一条问题。", voice = current.inCall)
+
     fun send(value: String, voice: Boolean = false): Boolean {
         val settings = current.settings ?: return false
         val scope = current.serviceScope ?: return false
@@ -193,11 +210,19 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         listenJob?.cancel()
         speech.cancelRecognition()
         stopReading()
-        val user = Message(role = Role.USER, text = text, delivery = Delivery.PENDING)
+        val now = System.currentTimeMillis()
+        val user = Message(role = Role.USER, text = text, delivery = Delivery.PENDING, timestamp = now)
         val existing = current.conversation
-        val thread = if (existing.title.isNotEmpty()) existing else existing.copy(title = titleFrom(text))
+        val isFirstMessage = existing.title.isEmpty()
+        val thread = if (!isFirstMessage) existing else existing.copy(title = titleFrom(text))
         val messages = (current.messages + user).takeLast(TRANSCRIPT_LIMIT)
         val voiceSession = callId.takeIf { voice && current.inCall }
+        val useLiveReading = voiceSession != null && settings.readingMode == ReadingMode.LIVE
+        val interruptionContext = if (voice) pendingInterruption else ""
+        pendingInterruption = ""
+        activeSpokenPhrase = null
+        lastCompletedPhrase = null
+        activeResponseId = null
         val latest = AtomicReference(ResponseDraft())
         update {
             it.copy(conversation = thread, messages = messages, activeTurn = user.id, draft = ResponseDraft(),
@@ -210,33 +235,138 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             var answers = emptyList<Message>()
             var result = Delivery.FAILED
             var issue: String? = null
+            var liveStreamId: Long? = null
+            var livePending = ""
+            var liveConsumed = 0
+            var liveSpokenAny = false
+            var livePlaybackError: String? = null
+            var livePlaybackDone = false
+
+            fun startLiveStreamIfNeeded(): Long? {
+                if (!useLiveReading || voiceSession != callId || !current.inCall || !foreground) return null
+                liveStreamId?.let { return it }
+                val session = voiceSession
+                val streamId = speech.beginSpeechStream(
+                    settings = settings,
+                    onPhraseStart = { phrase -> activeSpokenPhrase = phrase },
+                    onPhraseDone = { phrase ->
+                        lastCompletedPhrase = phrase
+                        if (activeSpokenPhrase == phrase) activeSpokenPhrase = null
+                    },
+                    finished = { error ->
+                        livePlaybackDone = true
+                        livePlaybackError = error
+                        val shouldListen = callId == session && current.inCall && !current.busy && foreground && !current.loading
+                        update {
+                            it.copy(
+                                reading = null,
+                                notice = error ?: it.notice,
+                                call = when {
+                                    callId != session || !it.inCall -> it.call
+                                    error != null -> CallStage.PAUSED
+                                    shouldListen -> CallStage.WAITING
+                                    else -> it.call
+                                }
+                            )
+                        }
+                        if (shouldListen && error == null) scheduleListening(300)
+                    }
+                )
+                if (streamId != null) {
+                    liveStreamId = streamId
+                    update { it.copy(reading = CALL_PLAYBACK, call = CallStage.SPEAKING, level = 0f) }
+                }
+                return streamId
+            }
+
+            fun feedLiveSpeech(fullText: String, flush: Boolean) {
+                if (!useLiveReading || voiceSession != callId || !current.inCall) return
+                if (fullText.length > liveConsumed) {
+                    livePending += fullText.substring(liveConsumed)
+                    liveConsumed = fullText.length
+                }
+                if (livePending.isEmpty() && !flush) return
+                val split = splitSpeech(livePending, flush = flush, opening = !liveSpokenAny)
+                livePending = split.rest
+                if (split.phrases.isNotEmpty()) {
+                    val streamId = startLiveStreamIfNeeded() ?: return
+                    for (phrase in split.phrases) {
+                        liveSpokenAny = true
+                        speech.enqueueSpeechPhrase(streamId, phrase)
+                    }
+                }
+                if (flush) {
+                    val streamId = liveStreamId
+                    if (streamId != null) {
+                        speech.sealSpeechStream(streamId)
+                    }
+                }
+            }
+
             try {
                 withContext(NonCancellable) {
                     pollJob?.cancelAndJoin()
                     withContext(Dispatchers.IO) {
-                        store.startTurn(scope, thread, user, System.currentTimeMillis())
+                        store.startTurn(scope, thread, user, now)
                         store.rememberThread(scope, thread.id)
                     }
                     stored = true
                 }
                 ensureActive()
                 val remoteId = if (!settings.usesConversation) null else thread.remoteId ?: run {
-                    val created = api.createConversation(settings)
+                    val created = api.createConversation(settings, mapOf("source" to "turnline"))
                     withContext(NonCancellable) {
                         withContext(Dispatchers.IO) { store.setRemoteId(thread.id, created) }
                         update { it.copy(conversation = it.conversation.copy(remoteId = created)) }
                     }
                     created
                 }
+                if (remoteId != null && isFirstMessage && !text.startsWith("/")) {
+                    viewModelScope.launch {
+                        runCatching {
+                            api.updateConversationMetadata(
+                                settings,
+                                remoteId,
+                                mapOf("source" to "turnline", "title" to thread.title)
+                            )
+                        }
+                    }
+                }
                 ensureActive()
-                answers = api.respond(settings, remoteId, messages, voice) { draft ->
+                val voiceInstructions = if (voice) {
+                    buildVoiceInstructions(settings.customInstructions, interruptionContext)
+                } else null
+                answers = api.respond(
+                    settings = settings,
+                    conversationId = remoteId,
+                    messages = messages,
+                    voice = voice,
+                    instructions = voiceInstructions,
+                    background = remoteId != null,
+                    onResponseCreated = { createdResponseId -> activeResponseId = createdResponseId }
+                ) { draft ->
                     latest.set(draft)
                     viewModelScope.launch {
-                        if (current.activeTurn == user.id) update { it.copy(draft = draft, reachable = true) }
+                        if (current.activeTurn == user.id) {
+                            update {
+                                it.copy(
+                                    draft = draft,
+                                    reachable = true,
+                                    notice = draft.failureNotice ?: it.notice
+                                )
+                            }
+                            if (useLiveReading && draft.text.isNotBlank()) {
+                                feedLiveSpeech(draft.text, flush = false)
+                            }
+                        }
                     }
                 }.map { output ->
-                    Message(role = Role.ASSISTANT, text = output.text,
-                        remoteId = output.id.takeIf { settings.usesConversation })
+                    Message(
+                        role = Role.ASSISTANT,
+                        text = output.text,
+                        remoteId = output.id.takeIf { settings.usesConversation },
+                        timestamp = System.currentTimeMillis()
+                    )
                 }
                 result = Delivery.COMPLETE
             } catch (error: CancellationException) {
@@ -253,11 +383,18 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             } finally {
                 // Finish the local turn, including the UI update, even when the HTTP call was cancelled.
                 withContext(NonCancellable) {
+                    activeResponseId = null
                     val complete = result == Delivery.COMPLETE
                     if (!complete) {
+                        if (liveStreamId != null) stopReading()
                         answers = latest.get().outputs.map { output ->
-                            Message(role = Role.ASSISTANT, text = output.text, delivery = result,
-                                remoteId = output.id.takeIf { settings.usesConversation })
+                            Message(
+                                role = Role.ASSISTANT,
+                                text = output.text,
+                                delivery = result,
+                                remoteId = output.id.takeIf { settings.usesConversation },
+                                timestamp = System.currentTimeMillis()
+                            )
                         }
                     }
                     var transcript = current.messages.filterNot { it.id == user.id }
@@ -277,17 +414,33 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                         }
                     }
                     if (current.activeTurn == user.id) {
+                        val combinedText = answers.joinToString("\n\n") { it.text }
                         update {
                             val conversation = if (stored) it.conversation else it.conversation.copy(title = existing.title)
                             it.copy(conversation = conversation,
                                 messages = transcript, history = history, activeTurn = null, draft = null,
                                 reachable = complete || (issue == null && it.reachable),
-                                notice = saveIssue ?: issue, recoverText = text.takeIf { result == Delivery.FAILED })
+                                notice = saveIssue ?: issue ?: livePlaybackError ?: it.notice,
+                                recoverText = text.takeIf { result == Delivery.FAILED })
                         }
                         if (current.inCall && foreground && !current.loading) {
                             when {
+                                complete && voiceSession == callId && useLiveReading -> {
+                                    feedLiveSpeech(combinedText, flush = true)
+                                    if (!liveSpokenAny) {
+                                        update { it.copy(call = CallStage.WAITING) }
+                                        scheduleListening(300)
+                                    } else if (livePlaybackDone) {
+                                        if (livePlaybackError != null) {
+                                            update { it.copy(call = CallStage.PAUSED) }
+                                        } else {
+                                            update { it.copy(call = CallStage.WAITING) }
+                                            scheduleListening(300)
+                                        }
+                                    }
+                                }
                                 complete && voiceSession == callId ->
-                                    play(answers.joinToString("\n\n") { it.text }, CALL_PLAYBACK)
+                                    play(combinedText, CALL_PLAYBACK)
                                 issue != null || saveIssue != null -> update { it.copy(call = CallStage.PAUSED) }
                                 else -> scheduleListening(300)
                             }
@@ -301,6 +454,14 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun stopResponse() {
+        val settings = current.settings
+        val responseId = activeResponseId
+        if (settings?.usesConversation == true && responseId != null) {
+            activeResponseId = null
+            viewModelScope.launch {
+                runCatching { api.cancelResponse(settings, responseId) }
+            }
+        }
         turnJob?.cancel()
     }
 
@@ -309,7 +470,14 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         stopReading()
         callId++
         silenceCount = 0
-        update { it.copy(call = CallStage.WAITING, notice = null) }
+        pendingInterruption = ""
+        update {
+            it.copy(
+                call = CallStage.WAITING,
+                callStartedAt = SystemClock.elapsedRealtime(),
+                notice = null
+            )
+        }
         if (!current.busy) scheduleListening(0)
     }
 
@@ -319,7 +487,10 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         listenJob?.cancel()
         speech.cancelRecognition()
         stopReading()
-        update { it.copy(call = CallStage.OFF, partialSpeech = "", level = 0f) }
+        pendingInterruption = ""
+        activeSpokenPhrase = null
+        lastCompletedPhrase = null
+        update { it.copy(call = CallStage.OFF, callStartedAt = null, partialSpeech = "", level = 0f) }
     }
 
     fun callAction() {
@@ -337,9 +508,11 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                 }
             }
             CallStage.SPEAKING -> {
+                recordInterruptionPoint()
+                if (current.busy) stopResponse()
                 stopReading()
                 update { it.copy(call = CallStage.WAITING) }
-                scheduleListening(320)
+                scheduleListening(280)
             }
             CallStage.PAUSED -> {
                 silenceCount = 0
@@ -348,6 +521,18 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             }
             CallStage.OFF -> Unit
         }
+    }
+
+    private fun recordInterruptionPoint() {
+        val fragment = activeSpokenPhrase?.trim().orEmpty()
+        val last = lastCompletedPhrase?.trim().orEmpty()
+        pendingInterruption = when {
+            fragment.isNotEmpty() -> "上一轮语音回复在播到「$fragment」附近时被打断。"
+            last.isNotEmpty() -> "上一轮语音回复被打断。最后完整播完的一句是「$last」。"
+            else -> "上一轮语音回复被打断时，还没有完整播完一句。"
+        }
+        activeSpokenPhrase = null
+        lastCompletedPhrase = null
     }
 
     private fun scheduleListening(ms: Long) {
@@ -367,8 +552,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                 if (callId != session || !current.inCall) return@listen
                 when (heard) {
                     is Heard.Text -> {
-                        val stem = heard.value.replace(Regex("[\\s，。,.、…]+"), "")
-                        if (stem.matches(Regex("[嗯唔哦噢喔啊]{1,3}"))) {
+                        if (isBackchannel(heard.value)) {
                             repeatAfterSilence()
                             return@listen
                         }
@@ -408,6 +592,8 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             listenJob?.cancel()
             speech.cancelRecognition()
         }
+        activeSpokenPhrase = null
+        lastCompletedPhrase = null
         fun finished(error: String?) {
             val shouldListen = call && callId == session && current.inCall
             update {
@@ -423,7 +609,16 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             return
         }
         update { it.copy(reading = id, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
-        speech.speak(spoken, settings, ::finished)
+        speech.speak(
+            text = spoken,
+            settings = settings,
+            onPhraseStart = { phrase -> activeSpokenPhrase = phrase },
+            onPhraseDone = { phrase ->
+                lastCompletedPhrase = phrase
+                if (activeSpokenPhrase == phrase) activeSpokenPhrase = null
+            },
+            finished = ::finished
+        )
     }
 
     private fun stopReading() {
@@ -458,9 +653,9 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     if (current.conversation.id != thread.id || current.busy) return@launch
                     if (changed) {
                         withContext(NonCancellable) {
-                            val (messages, history) = withContext(Dispatchers.IO) {
-                                store.applyPage(thread.id, page)
-                                store.messages(thread.id) to store.conversations(scope)
+                            val (arrived, messages, history) = withContext(Dispatchers.IO) {
+                                val added = store.applyPage(thread.id, page)
+                                Triple(added, store.messages(thread.id), store.conversations(scope))
                             }
                             cursor = page.cursor
                             update { state ->
@@ -468,6 +663,12 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                                 val transcript = if (pending == null) messages else (messages + pending).takeLast(TRANSCRIPT_LIMIT)
                                 state.copy(conversation = state.conversation.copy(cursor = cursor), messages = transcript,
                                     history = history, reachable = true)
+                            }
+                            if (arrived.isNotEmpty() && current.inCall && foreground && !current.busy &&
+                                current.reading == null && current.call != CallStage.TRANSCRIBING
+                            ) {
+                                val summary = updateSpeech(arrived.last().text)
+                                if (!summary.isNullOrBlank()) play(summary, CALL_PLAYBACK)
                             }
                         }
                     } else if (!current.reachable) {
