@@ -39,14 +39,17 @@ class CaptureTurnTest(unittest.IsolatedAsyncioTestCase):
         active = np.flatnonzero(np.abs(audio) >= 650)
         self.voice = audio[active[0]:active[-1] + 1]
         self.events = []
+        self.recognition_calls = []
 
-    async def run_audio(self, audio, transcripts, force_at=None):
+    async def run_audio(self, audio, transcripts, *, force_at=None, minimum=None, manual=False):
         output = iter(transcripts)
+        calls = self.recognition_calls
 
         class Recognition:
             async def transcribe(self, _samples, current, *, final=True):
                 if not current():
                     return None
+                calls.append(final)
                 if not final:
                     return "正在转写"
                 return next(output, "一个连续的测试句子。")
@@ -55,6 +58,9 @@ class CaptureTurnTest(unittest.IsolatedAsyncioTestCase):
             self.events.append(event)
 
         engine = TurnEngine(Recognition(), emit)
+        if minimum is not None:
+            engine.min_voice_seconds = minimum
+        engine.manual = manual
         engine.prepare()
         await engine.set_mode("listen")
         worker = asyncio.create_task(engine.transcribe())
@@ -86,6 +92,41 @@ class CaptureTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(commits[0]["silenceWaitMs"], 480)
         self.assertLess(commits[0]["silenceWaitMs"], 512)
 
+    async def test_short_voice_is_dropped_before_recognition_even_with_a_pause(self):
+        clip = self.voice[:round(0.92 * SAMPLE_RATE)]
+        audio = np.concatenate([clip, self.silence(0.9), clip, self.silence(3)])
+        await self.run_audio(audio, [])
+        self.assertIn("resumed", [event["type"] for event in self.events])
+        commits = [event for event in self.events if event["type"] == "commit"]
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0]["text"], "")
+        self.assertGreater(commits[0]["voiceEndSample"] - commits[0]["startSample"], 2 * SAMPLE_RATE)
+        self.assertLess(commits[0]["voicedMs"], 2000)
+        self.assertEqual(self.recognition_calls, [])
+
+    async def test_voice_across_two_short_phrases_reaches_the_threshold(self):
+        clip = self.voice[:round(1.4 * SAMPLE_RATE)]
+        audio = np.concatenate([clip, self.silence(0.9), clip, self.silence(3)])
+        await self.run_audio(audio, ["继续说完了。"])
+        resumed = next(i for i, event in enumerate(self.events) if event["type"] == "resumed")
+        self.assertEqual([event["type"] for event in self.events[:resumed]], ["speech-start"])
+        commits = [event for event in self.events if event["type"] == "commit"]
+        self.assertEqual([event["text"] for event in commits], ["继续说完了。"])
+        self.assertGreaterEqual(commits[0]["voicedMs"], 2000)
+
+    async def test_disabling_filter_allows_short_voice(self):
+        clip = self.voice[:SAMPLE_RATE]
+        await self.run_audio(np.concatenate([clip, self.silence(3)]), ["现在几点？"], minimum=0)
+        self.assertTrue(self.recognition_calls)
+        self.assertEqual([event["text"] for event in self.events if event["type"] == "commit"], ["现在几点？"])
+
+    async def test_manual_release_drops_short_voice_after_a_long_hold(self):
+        clip = self.voice[:SAMPLE_RATE]
+        audio = np.concatenate([clip, self.silence(4)])
+        await self.run_audio(audio, [], force_at=4 * SAMPLE_RATE, manual=True)
+        self.assertEqual(self.recognition_calls, [])
+        self.assertEqual([event["text"] for event in self.events if event["type"] == "commit"], [""])
+
     async def test_long_dictation_crosses_internal_chunk_boundaries(self):
         audio = np.concatenate([self.voice] * 6 + [self.silence(2)])
         self.assertGreater(len(audio) / SAMPLE_RATE, 20)
@@ -95,8 +136,13 @@ class CaptureTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(sum(event["type"] == "partial" for event in self.events), 2)
 
     async def test_force_commit_does_not_wait_for_silero_to_close_the_unit(self):
-        await self.run_audio(self.voice[:SAMPLE_RATE * 2], ["立即提交"], force_at=SAMPLE_RATE * 2 - 600)
+        await self.run_audio(self.voice[:SAMPLE_RATE * 2], ["立即提交"], force_at=SAMPLE_RATE * 2 - 600, minimum=1)
         commits = [event for event in self.events if event["type"] == "commit"]
         self.assertEqual(len(commits), 1)
         self.assertEqual(commits[0]["text"], "立即提交")
         self.assertEqual(commits[0]["silenceWaitMs"], 0)
+
+    async def test_force_commit_drops_short_active_voice(self):
+        await self.run_audio(self.voice[:SAMPLE_RATE], [], force_at=SAMPLE_RATE - 600)
+        self.assertEqual(self.recognition_calls, [])
+        self.assertEqual([event["text"] for event in self.events if event["type"] == "commit"], [""])

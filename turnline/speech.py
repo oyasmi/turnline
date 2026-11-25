@@ -17,6 +17,7 @@ FRAME_SAMPLES = 512
 VAD_BUFFER_SECONDS = 30
 PRE_ROLL_SAMPLES = 6 * FRAME_SAMPLES
 HISTORY_CAPACITY = VAD_BUFFER_SECONDS * SAMPLE_RATE + PRE_ROLL_SAMPLES
+MIN_VOICE_RMS = 0.003
 SETUP_HINT = "请在 Turnline 仓库根目录运行 uv run python setup_models.py。"
 
 def require(*paths):
@@ -162,6 +163,13 @@ class RecognitionQueue:
         return await asyncio.shield(worker)
 
 
+def voiced_samples(samples):
+    # Ignore quiet frames within a Silero segment, including its padding.
+    framed_length = len(samples) // FRAME_SAMPLES * FRAME_SAMPLES
+    frames = samples[:framed_length].reshape(-1, FRAME_SAMPLES)
+    return int(np.count_nonzero(np.mean(frames**2, axis=1) >= MIN_VOICE_RMS**2)) * FRAME_SAMPLES
+
+
 class VoiceActivity:
     def __init__(self, *, minimum=0.128, threshold=0.55, silence=0.256, maximum=8, preroll=PRE_ROLL_SAMPLES):
         self.minimum = minimum
@@ -173,11 +181,13 @@ class VoiceActivity:
         self.detector = None
         self.history = sherpa_onnx.CircularBuffer(HISTORY_CAPACITY)
         self.last_segment_end = 0
+        self.active_start = 0
 
     def reset(self):
         self.detecting = False
         self.history.reset()
         self.last_segment_end = 0
+        self.active_start = 0
         if self.detector is not None:
             self.detector.reset()
             return
@@ -193,6 +203,12 @@ class VoiceActivity:
         config.silero_vad.window_size = FRAME_SAMPLES
         self.detector = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=VAD_BUFFER_SECONDS)
 
+    def active_voiced(self, end, needed=FRAME_SAMPLES):
+        start = max(self.active_start, self.last_segment_end, self.history.head)
+        if end - start < needed:
+            return 0
+        return voiced_samples(np.asarray(self.history.get(start, end - start), dtype=np.float32))
+
     def accept(self, samples):
         excess = self.history.size + FRAME_SAMPLES - HISTORY_CAPACITY
         if excess > 0:
@@ -202,16 +218,20 @@ class VoiceActivity:
         detected = self.detector.is_speech_detected()
         started = detected and not self.detecting
         self.detecting = detected
+        if started:
+            self.active_start = self.detector.current_segment.start
         segments = []
         while not self.detector.empty():
             segment = self.detector.front
-            samples = segment.samples
+            samples = np.asarray(segment.samples, dtype=np.float32)
+            voiced = voiced_samples(samples[max(0, self.last_segment_end - segment.start):])
             # Silero can start after the first phoneme. Restore only audio from
             # this epoch and leave samples from previously delivered turns out.
             prefix_start = max(self.history.head, self.last_segment_end, segment.start - self.preroll)
             self.last_segment_end = segment.start + len(samples)
             if prefix_start < segment.start:
-                samples = self.history.get(prefix_start, segment.start - prefix_start) + samples
-            segments.append((prefix_start, self.last_segment_end, np.asarray(samples, dtype=np.float32)))
+                prefix = self.history.get(prefix_start, segment.start - prefix_start)
+                samples = np.concatenate((np.asarray(prefix, dtype=np.float32), samples))
+            segments.append((prefix_start, self.last_segment_end, samples, voiced))
             self.detector.pop()
         return started, segments

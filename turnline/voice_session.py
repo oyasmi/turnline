@@ -12,7 +12,7 @@ import numpy as np
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from .synthesis import AUDIBLE_THRESHOLD
-from .turn_engine import RESPONSE_SPEEDS, TurnEngine
+from .turn_engine import DEFAULT_MIN_VOICE_SECONDS, MIN_VOICE_SECONDS, RESPONSE_SPEEDS, TurnEngine
 
 LOG = logging.getLogger("turnline")
 SPEECH_RATES = (0.9, 1.0, 1.07, 1.15)
@@ -57,7 +57,11 @@ class VoiceSession:
                 speed = data.get("speed")
                 if not isinstance(speed, str) or speed not in RESPONSE_SPEEDS:
                     raise ValueError("无效的反应速度。")
+                minimum = data.get("minVoiceSeconds", DEFAULT_MIN_VOICE_SECONDS)
+                if type(minimum) is not int or minimum not in MIN_VOICE_SECONDS:
+                    raise ValueError("无效的最短有效语音时长。")
                 self.input.speed = speed
+                self.input.min_voice_seconds = minimum
                 self.input.expecting_answer = data.get("expectingAnswer") is True
                 self.input.manual = data.get("manual") is True
             elif kind == "reset":

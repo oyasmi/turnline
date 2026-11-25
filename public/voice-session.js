@@ -158,8 +158,8 @@ export class VoiceSession {
     if (this.ready && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(event));
   }
 
-  configure(speed, expectingAnswer, manual = false) {
-    this.options = { type: 'configure', speed, expectingAnswer, manual };
+  configure(speed, expectingAnswer, manual = false, minVoiceSeconds) {
+    this.options = { type: 'configure', speed, expectingAnswer, manual, minVoiceSeconds };
     this.send(this.options);
   }
 

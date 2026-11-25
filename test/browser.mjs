@@ -166,10 +166,13 @@ try {
     await page.getByRole('textbox', { name: '文字消息' }).fill(text);
     await page.getByRole('button', { name: '发送', exact: true }).click();
   };
-  const configure = async (reading, duplex) => {
+  const configure = async (reading, duplex, minVoiceSeconds) => {
     await page.getByRole('button', { name: '通话设置' }).click();
     await page.locator('#reading').selectOption(reading);
     await page.locator('#duplex').setChecked(duplex);
+    if (minVoiceSeconds !== undefined) {
+      await page.locator('#min-voice-seconds').selectOption(String(minVoiceSeconds));
+    }
     await page.getByRole('button', { name: '保存设置' }).click();
   };
 
@@ -185,6 +188,7 @@ try {
   assert.equal(await page.locator('#speed').inputValue(), 'balanced');
   assert.equal(await page.locator('#reading').inputValue(), 'live');
   assert.equal(await page.locator('#rate').inputValue(), '1');
+  assert.equal(await page.locator('#min-voice-seconds').inputValue(), '2');
   assert.equal(await page.locator('#duplex').isChecked(), false);
   await page.locator('#close-settings').click();
   const [plainRequest] = await Promise.all([
@@ -216,7 +220,18 @@ try {
   } catch (error) {
     throw new Error('Call not ready. Status: ' + await page.locator('#status').textContent() + ', error: ' + await page.locator('#error').textContent(), { cause: error });
   }
+  const beforeShortVoice = voiceEvents.length;
   await page.evaluate(() => window.speakTestUtterance());
+  await waitForText('#status', /正在听你说/);
+  await waitForText('#status', /正在聆听/);
+  const shortVoice = voiceEvents.slice(beforeShortVoice);
+  assert.equal(shortVoice.some(event => event.type === 'partial' || event.type === 'tentative'), false);
+  assert.ok(shortVoice.some(event => event.type === 'commit' && !event.text && event.voicedMs < 2000));
+  assert.equal(await page.locator('.entry.user').count(), 0);
+
+  const longVoice = '你好，请帮我看看明天北京的天气怎么样，出门需要带伞吗？';
+  await page.evaluate(text => window.prepareTestSpeech(text), longVoice);
+  await page.evaluate(text => window.speakTestUtterance(text), longVoice);
   await waitForText('.entry.user:not(.draft) .content', /天气/);
   await waitForText('#metric-asr', /\d+ ms/);
   await waitForText('#metric-audio', /\d+ ms/);
@@ -232,7 +247,7 @@ try {
   });
   await waitForText('#status', /正在聆听/);
 
-  await configure('live', false);
+  await configure('live', false, 0);
   const sampleCount = Number(process.env.TURNLINE_TEST_LATENCY_SAMPLES ?? 0);
   if (!Number.isInteger(sampleCount) || sampleCount < 0) throw new Error('Invalid latency sample count');
   if (sampleCount) {

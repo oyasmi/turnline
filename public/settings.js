@@ -4,6 +4,7 @@ const PREFERENCES = 'turnline.preferences.v2';
 const PREVIOUS_PREFERENCES = 'turnline.preferences.v1';
 const RESPONSE_SPEEDS = ['quick', 'balanced', 'patient'];
 const SPEECH_RATES = [0.9, 1, 1.07, 1.15];
+const MIN_VOICE_SECONDS = [0, 1, 2, 3, 5];
 const LEGACY_SPEED = { 0.35: 'quick', 0.5: 'quick', 0.8: 'balanced', 1.2: 'patient',
   1: 'quick', 1.5: 'quick', 2.2: 'balanced', 3: 'patient' };
 const DIRECT_ADDRESS = 'turnline.direct-address.v1';
@@ -49,6 +50,7 @@ export function preferences() {
     tones: saved?.tones !== false,
     waitingTone: saved?.waitingTone !== false,
     inputMode: saved?.inputMode === 'hold' ? 'hold' : 'auto',
+    minVoiceSeconds: MIN_VOICE_SECONDS.includes(saved?.minVoiceSeconds) ? saved.minVoiceSeconds : 2,
     duplex: saved?.duplex === true,
     instructions: typeof saved?.instructions === 'string' ? saved.instructions.slice(0, 3000) : '',
   };

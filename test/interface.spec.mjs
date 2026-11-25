@@ -175,6 +175,23 @@ test('safe Markdown, waiting audio, playback range and interruption', async ({ p
   await expect(page.locator('.entry.user')).toHaveCount(1);
 });
 
+test('minimum speech duration is saved and sent when the voice connection opens', async ({ page }) => {
+  const voice = await fixture(page);
+  const minimum = page.getByLabel('最短有效语音');
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await expect(minimum).toHaveValue('2');
+  expect(await minimum.locator('option').evaluateAll(options => options.map(option => option.value)))
+    .toEqual(['0', '1', '2', '3', '5']);
+  await minimum.selectOption('0');
+  await page.getByRole('button', { name: '保存设置' }).click();
+  await page.reload();
+  await page.getByRole('button', { name: '通话设置' }).click();
+  await expect(minimum).toHaveValue('0');
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
+  await startCall(page);
+  await expect.poll(() => voice.requests.findLast(event => event.type === 'configure')?.minVoiceSeconds).toBe(0);
+});
+
 test('hold-to-talk gates microphone frames and release commits once', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const voice = await fixture(page);

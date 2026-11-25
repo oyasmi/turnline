@@ -312,7 +312,8 @@ function prewarmVoice() {
 }
 
 function configureVoice() {
-  voice.configure(settings.speed, expectingAnswer, settings.inputMode === 'hold' || held || releasing);
+  voice.configure(settings.speed, expectingAnswer, settings.inputMode === 'hold' || held || releasing,
+    settings.minVoiceSeconds);
 }
 
 function syncMedia() {
@@ -896,6 +897,7 @@ function openSettings() {
   $('tones').checked = settings.tones;
   $('waiting-tone').checked = settings.waitingTone;
   $('input-mode').value = settings.inputMode;
+  $('min-voice-seconds').value = String(settings.minVoiceSeconds);
   $('duplex').checked = settings.duplex;
   dialog.showModal();
 }
@@ -963,6 +965,7 @@ $('settings-form').onsubmit = event => {
   event.preventDefault();
   const next = {
     reading: $('reading').value, speed: $('speed').value, rate: Number($('rate').value),
+    minVoiceSeconds: Number($('min-voice-seconds').value),
     tones: $('tones').checked, waitingTone: $('waiting-tone').checked, inputMode: $('input-mode').value, duplex: $('duplex').checked, instructions: $('instructions').value.trim(),
   };
   const captureChanged = next.duplex !== settings.duplex || next.inputMode !== settings.inputMode;

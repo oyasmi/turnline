@@ -13,6 +13,9 @@ from .speech import FRAME_SAMPLES, SAMPLE_RATE, VoiceActivity
 
 LOG = logging.getLogger("turnline")
 RESPONSE_SPEEDS = {"quick": 0.75, "balanced": 1, "patient": 1.5}
+MIN_VOICE_SECONDS = (0, 1, 2, 3, 5)
+DEFAULT_MIN_VOICE_SECONDS = 2
+OPEN_END_SECONDS = 1.9
 OPEN_END = re.compile(
     r"(?:然后|就是|就是说|也就是说|比如|那个|因为|如果|还有|以及|或者|但是|现在|"
     r"我想问(?:一|一?下)?|帮我(?:看|查)(?:一?下)?|和|的|把|给|"
@@ -27,7 +30,7 @@ def endpoint_wait(text, voiced_seconds, speed, expecting_answer=False):
     text = text.strip().rstrip("”’」』\"")
     short_answer = bool(SHORT_ANSWER.fullmatch(text.rstrip("。！？.!?")))
     if OPEN_END.search(text) or text.endswith(("，", "、", ",", "…", "：", ":")):
-        seconds = 1.9
+        seconds = OPEN_END_SECONDS
     elif voiced_seconds < 0.6 and not short_answer:
         seconds = 1.8
     elif expecting_answer and short_answer or COMPLETE_END.search(text):
@@ -50,6 +53,7 @@ class InputTurn:
     id: int
     start: int
     active_start: int
+    minimum_voice_samples: int
     last_end: int | None = None
     units: list = field(default_factory=list)
     stable: str = ""
@@ -77,6 +81,7 @@ class TurnEngine:
         self.mode = "off"
         self.manual = False
         self.speed = "balanced"
+        self.min_voice_seconds = DEFAULT_MIN_VOICE_SECONDS
         self.expecting_answer = False
         self.epoch = 0
         self.cursor = 0
@@ -169,7 +174,8 @@ class TurnEngine:
                 onset = local_start + (int(active[0]) if active.size else 0)
                 onset += self.base
                 overlap = bool(self.overlap_until and onset < self.overlap_until)
-                self.turn = InputTurn(self.count, onset, self.base + local_start)
+                self.turn = InputTurn(self.count, onset, self.base + local_start,
+                                      minimum_voice_samples=self.min_voice_seconds * SAMPLE_RATE)
                 await self.event("speech-start", self.turn, startSample=onset, overlap=overlap,
                                  duringPlayback=self.mode == "barge")
             elif self.turn.closed:
@@ -184,22 +190,34 @@ class TurnEngine:
         turn = self.turn
         if turn is None:
             return
-        for _, end, samples in segments:
-            turn.voiced += len(samples)
-            turn.last_end = self.base + end
-            turn.units.append(samples)
-            turn.revision += 1
-            turn.closed = True
-            turn.final_ready = False
+        for _, end, samples, voiced in segments:
+            self.close_unit(turn, self.base + end, samples, voiced)
+        if self.vad.detecting and not turn.closed and at - max(turn.start, turn.last_preview) >= 10240:
+            remaining = turn.minimum_voice_samples - turn.voiced
+            # The latest frames can still be removed by Silero's end-of-speech detection.
+            confirmed = at - self.base - round(self.vad.silence * SAMPLE_RATE) - FRAME_SAMPLES
+            if remaining <= 0 or self.vad.active_voiced(confirmed, remaining) >= remaining:
+                history = self.vad.history
+                start = max(history.head, turn.active_start - self.base, at - self.base - 8 * SAMPLE_RATE)
+                samples = np.asarray(history.get(start, at - self.base - start), dtype=np.float32)
+                turn.last_preview = at
+                self.schedule(turn, samples=samples, final=False)
+        await self.maybe_commit(turn, at, frame)
+
+    def close_unit(self, turn, end, samples, voiced):
+        turn.voiced += voiced
+        turn.last_end = end
+        turn.units.append(samples)
+        turn.revision += 1
+        turn.closed = True
+        turn.final_ready = turn.voiced < turn.minimum_voice_samples
+        if turn.final_ready:
+            # Allow another phrase to join this turn before dropping it.
+            turn.wait_ms = round(1000 * OPEN_END_SECONDS * RESPONSE_SPEEDS[self.speed])
+            self.job = None
+        else:
             turn.wait_ms = None
             self.schedule(turn, samples=None, final=True)
-        if self.vad.detecting and not turn.closed and at - max(turn.start, turn.last_preview) >= 10240:
-            history = self.vad.history
-            start = max(history.head, turn.active_start - self.base, at - self.base - 8 * SAMPLE_RATE)
-            samples = np.asarray(history.get(start, at - self.base - start), dtype=np.float32)
-            turn.last_preview = at
-            self.schedule(turn, samples=samples, final=False)
-        await self.maybe_commit(turn, at, frame)
 
     def schedule(self, turn, samples, final):
         self.job = (turn, turn.revision, tuple(turn.units), samples, final)
@@ -265,7 +283,7 @@ class TurnEngine:
                                              self.expecting_answer) if turn.text else 0
                 if not self.manual:
                     await self.event("tentative", turn, text=turn.text, voiceEndSample=turn.last_end,
-                                     waitMs=turn.wait_ms, voicedMs=round((turn.last_end - turn.start) / 16))
+                                     waitMs=turn.wait_ms, voicedMs=round(turn.voiced / 16))
                 await self.maybe_commit(turn, self.cursor)
 
     async def maybe_commit(self, turn, at, frame=None):
@@ -279,8 +297,9 @@ class TurnEngine:
             if frame is not None and silence_ms < turn.wait_ms + 160 and np.sqrt(np.mean(frame**2)) > 0.012:
                 return
         self.turn = self.job = None
-        await self.event("commit", turn, text=turn.text, startSample=turn.start, voiceEndSample=turn.last_end,
-                         silenceWaitMs=silence_ms, asrMs=turn.asr_ms, voicedMs=round((turn.last_end - turn.start) / 16))
+        text = turn.text if turn.voiced >= turn.minimum_voice_samples else ""
+        await self.event("commit", turn, text=text, startSample=turn.start, voiceEndSample=turn.last_end,
+                         silenceWaitMs=silence_ms, asrMs=turn.asr_ms, voicedMs=round(turn.voiced / 16))
         if self.mode == "monitor" or (self.mode == "listen" and self.vad is not self.normal_vad):
             # The previous turn may have started before playback or a mode
             # change. Put the next turn on its own capture profile.
@@ -301,14 +320,11 @@ class TurnEngine:
         end = self.cursor - self.base
         if end <= start:
             return
-        turn.units.append(np.asarray(history.get(start, end - start), dtype=np.float32))
-        turn.voiced += end - start
-        turn.last_end = self.cursor
-        turn.closed = True
-        turn.revision += 1
+        samples = np.asarray(history.get(start, end - start), dtype=np.float32)
+        self.close_unit(turn, self.cursor, samples, self.vad.active_voiced(end))
         self.base = self.cursor
         self.reset_vad()
-        self.schedule(turn, samples=None, final=True)
+        await self.maybe_commit(turn, self.cursor)
 
     def discard(self, input_id):
         if self.turn and self.turn.id == input_id:
