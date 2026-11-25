@@ -1,66 +1,83 @@
-# Web 连接与部署
+# 连接与部署
 
-在仓库根目录按[快速开始](../README.md#快速开始)准备依赖和模型，再启动服务。
+在仓库根目录按 [快速开始](../README.md#快速开始) 准备好依赖与模型后，即可启动服务：
 
 ```bash
 uv run python server.py
 ```
 
-Turnline 默认监听 `127.0.0.1:8686`，页面、语音 WebSocket、音频流和对话中转共用一个端口。跨设备访问时，用受浏览器信任的 HTTPS 提供页面和麦克风访问。
+Turnline 默认监听 `127.0.0.1:8686`，页面、语音 WebSocket、流式音频和 PipiClaw 中转共用同一个端口。本机回环地址可直接通过 HTTP 使用麦克风；若要从手机或局域网内的其他设备访问，则必须通过受设备信任的 HTTPS 提供服务。
 
-## 连接 PipiClaw
+## 连接 PipiClaw 的两种方式
 
-| 方式 | 连接路径 | 配置 |
+| 方式 | 数据流向 | 适用场景与配置 |
 | --- | --- | --- |
-| 服务端中转 | 浏览器 → Turnline → 本机 PipiClaw | 默认使用 `~/.pipiclaw/state/webapi/api.sock`。以有权访问该 Socket 的用户运行 Turnline。 |
-| 浏览器直连 | 浏览器 → PipiClaw | 在「通话设置 → 浏览器直连」填写 PipiClaw 地址和密钥，点击「测试并连接」。 |
+| **服务端中转（默认）** | 浏览器 → Turnline → 本机 PipiClaw | Turnline 与 PipiClaw 运行在同一台机器。默认连接 `~/.pipiclaw/state/webapi/api.sock`，只需确保运行 Turnline 的系统用户有权访问该 Socket。 |
+| **浏览器直连** | 浏览器 → PipiClaw（语音仍经 Turnline） | Turnline 部署在外网或另一台主机，而 PipiClaw 仅在浏览器所在网络可达。在「通话设置 → 浏览器直连」中填入 PipiClaw 地址与密钥，点击「测试并连接」。 |
 
-浏览器直连适合 Turnline 已部署在外网、PipiClaw 只在浏览器所在网络可达的场景。可在 PipiClaw 主机上执行 `pipiclaw webapi key add turnline` 创建专用密钥。浏览器把地址保存在本地，把密钥保存在当前标签页的会话存储中。对话请求和密钥由浏览器直接发送给 PipiClaw，麦克风音频和待播报的回复片段仍由 Turnline 处理。
+关于浏览器直连的几点说明：
 
-跨设备直连时，为 PipiClaw 的 TCP 入口配置受信 HTTPS，并允许来自 Turnline 页面来源的跨源请求。PipiClaw 与浏览器位于同一设备时，可以使用 `http://127.0.0.1:8787`。如果浏览器请求本地网络权限，请按提示允许。只提供直连的实例可用 `--direct-only` 启动。
+- **生成专用密钥**：在 PipiClaw 主机上运行 `pipiclaw webapi key add turnline`。
+- **凭据存储与隐私**：浏览器将 PipiClaw 地址存于 `localStorage`，密钥仅存于当前标签页的 `sessionStorage`。对话正文和密钥由浏览器直接发往 PipiClaw；麦克风音频与待播报的回复片段仍由 Turnline 服务端处理。
+- **跨源与 HTTPS**：跨设备直连时，需为 PipiClaw 的 TCP 入口配置受信任的 HTTPS，并在 CORS 中允许 Turnline 页面来源。若 PipiClaw 与浏览器在同一设备上，可直接使用 `http://127.0.0.1:8787`（按浏览器提示允许本地网络访问）。
+- **纯直连部署**：若实例不接本机 PipiClaw，启动时加上 `--direct-only` 即可关闭中转并默认进入直连页面。
 
-## HTTPS 反向代理或隧道
+## 跨设备访问方案
 
-把 HTTPS 入口转发到本机的 `http://127.0.0.1:8686`。入口应支持 WebSocket 升级，及时转发 SSE 和音频流，并保留浏览器的 `Host`。代理从回环地址连接 Turnline 时，也可覆盖 `X-Forwarded-Host` 与 `X-Forwarded-Proto`，以传递外部主机和协议。使用独立域名或端口，让 Turnline 在该来源的根路径提供服务。
+### 方案一：SSH 本地端口转发（单人远程最简）
 
-**启用中转时，能访问 Turnline 入口的用户可以通过它操作本机 PipiClaw。** 仅向可信网络开放，或在外部入口配置访问控制。Turnline 的浏览器 Cookie 用于隔离中转会话。入口的访问控制由部署者配置。
-
-单用户也可通过 SSH 本地端口转发访问远端。保持以下命令运行，在本机浏览器打开 <http://127.0.0.1:8686>。
+只需本机访问远端 Turnline 时，不必折腾证书，直接建立端口转发，随后在本机浏览器打开 <http://127.0.0.1:8686>：
 
 ```bash
 ssh -N -L 8686:127.0.0.1:8686 user@turnline-host
 ```
 
-## Turnline 直接提供 HTTPS
+### 方案二：HTTPS 反向代理或隧道（推荐长期部署）
 
-已有受信证书时，可向 Turnline 提供 PEM 证书链和私钥。
+将 Nginx、Caddy 或内网隧道的 HTTPS 入口转发到本机 `http://127.0.0.1:8686`，并满足以下条件：
+
+- 支持 WebSocket 升级（`/speech/voice`）。
+- 关闭或避免缓冲，以便及时转发 SSE 事件流和 PCM 音频流。
+- 保留原始 `Host` 头；当代理从回环地址连接 Turnline 时，也可通过 `X-Forwarded-Host` 与 `X-Forwarded-Proto` 传递外部主机和协议。
+- 为 Turnline 分配独立域名或端口，挂载在根路径 `/` 下。
+
+> **安全提示**：启用服务端中转时，任何能够访问 Turnline 入口的人都可以借此操作本机 PipiClaw。Turnline 的浏览器 Cookie 仅用于隔离不同浏览器的会话，**不负责入口鉴权**。请仅向可信网络开放，或在反向代理层配置访问控制。
+
+### 方案三：Turnline 直接提供 HTTPS
+
+如果你已有受信任的 PEM 证书链与私钥，可直接交由 Turnline 监听：
 
 ```bash
 uv run python server.py --host 0.0.0.0 \
   --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
 ```
 
-可信局域网里也可以自建 CA。此方式需要 OpenSSL 和支持 `fcntl` 的系统。把下列地址替换为设备实际访问的 IP 或主机名。
+在可信局域网内，也可以让 Turnline 自动生成本地 CA 并签发服务端证书（需要系统安装 OpenSSL 且支持 `fcntl`）。将下方地址替换为设备实际访问的 IP 或主机名：
 
 ```bash
 uv run python server.py --host 0.0.0.0 --self-signed \
   --public-url https://192.168.1.5:8686
 ```
 
-把程序打印的 CA 证书导入访问设备的信任库，再打开该 HTTPS 地址。Turnline 会在状态目录中复用 CA 和有效的服务端证书。
+启动后，程序会打印本地 CA 证书路径。将该 CA 证书导入手机或电脑的系统信任库后，即可正常打开该 HTTPS 地址并使用麦克风。后续重启会自动复用状态目录中的 CA 与有效证书。
 
-## 配置与迁移
+## 启动参数与环境变量
 
-| 配置 | 用途 |
-| --- | --- |
-| `--host`、`--port` | 监听地址和端口。非回环监听要求 TLS。 |
-| `--pipiclaw-socket`、`PIPICLAW_HOME` | 显式指定 Socket，或通过 PipiClaw 根目录定位 `state/webapi/api.sock`。 |
-| `--state-dir`、`XDG_STATE_HOME` | 设置中转会话和本地证书的存放位置。默认使用 `~/.local/state/turnline/`，有 `XDG_STATE_HOME` 时使用其下的 `turnline/`。 |
-| `--public-url`、`TURNLINE_PUBLIC_URL` | 设置启动时显示的访问地址，也用于确定自建证书覆盖的主机。 |
-| `--direct-only` | 禁用 PipiClaw 中转。 |
-| `--tts-threads` | 设置合成线程数，默认为 2。 |
-| `--demo` | 仅在回环地址提供独立演示。 |
+完整参数可用 `uv run python server.py --help` 查看，常用项如下：
 
-从旧布局升级时，把启动脚本和服务的工作目录从 `web/` 改到仓库根目录，在根目录执行 `uv sync --locked --python 3.13` 重建 Python 环境。可将旧的 `web/models/` 移到 `models/` 复用模型。保留相同的访问地址和状态目录可继续访问原有的中转会话。
+| 参数 / 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host`、`--port` | `127.0.0.1`、`8686` | 监听地址与端口。监听非回环地址时必须提供 TLS 证书或 `--self-signed`。 |
+| `--pipiclaw-socket` / `PIPICLAW_HOME` | `~/.pipiclaw/state/webapi/api.sock` | 显式指定 Socket 路径，或通过 `PIPICLAW_HOME` 定位 `state/webapi/api.sock`。 |
+| `--state-dir` / `XDG_STATE_HOME` | `~/.local/state/turnline/` | 存放中转会话数据库与本地自签证书；设置 `XDG_STATE_HOME` 时落于其 `turnline/` 子目录。 |
+| `--public-url` / `TURNLINE_PUBLIC_URL` | 无 | 指定启动日志中显示的访问地址，也作为 `--self-signed` 签发证书的主机名来源。 |
+| `--direct-only` | 关闭 | 禁用服务端 PipiClaw 中转，仅提供浏览器直连。 |
+| `--tts-threads` | `2` | 语音合成推理线程数。 |
+| `--demo` | 关闭 | 仅限回环地址的独立演示模式，不连接 PipiClaw。 |
 
-若麦克风不可用，先检查访问地址的 HTTPS 信任状态与浏览器麦克风权限。若中转显示离线，检查 PipiClaw Web API 和 Socket 权限。若界面本身正常但语音模型加载失败，重新运行 `uv run python setup_models.py` 并查看服务日志。命令行参数可用 `uv run python server.py --help` 查看。
+## 常见问题排查
+
+- **麦克风无法开启**：确认访问地址是 `localhost` / `127.0.0.1` 或受设备信任的 HTTPS，并检查浏览器站点权限。
+- **页面提示中转离线**：确认本机 PipiClaw Web API 正在运行，且 Turnline 进程对 `api.sock` 具备读写权限。
+- **界面正常但语音无法识别或播报**：重新运行 `uv run python setup_models.py` 校验模型文件，并检查服务端日志。
+- **从早期 `web/` 目录布局升级**：将启动脚本的工作目录改回仓库根目录并重新执行 `uv sync --locked --python 3.13`；原有的 `web/models/` 可直接移动到根目录 `models/` 复用，保留原访问地址与状态目录即可无缝延续旧的中转会话。

@@ -1,42 +1,51 @@
 # Android 使用与构建
 
-Android 12 及以上。原生 Kotlin 与 Jetpack Compose 界面适配系统深色模式。手机直接向配置的服务发送文字请求，语音播报可使用 Android 系统语音或本机 Matcha 模型。
+Turnline Android 是独立运行的原生客户端，支持 **Android 12 及以上**，采用 Kotlin 与 Jetpack Compose 编写，自动适配系统深色模式。手机直接与 PipiClaw 或任意兼容的 Responses API 通信，语音播报既可用系统语音，也内置了可离线运行的 Matcha 中英双语模型。
 
-## 连接模型
+## 连接服务
 
-首次打开后点「连接服务」，选一种连接方式。
+首次打开应用，点击「连接服务」并选择后端类型：
 
-| 模式 | 需要填写 | 会话行为 |
+| 模式 | 必填项 | 会话行为 |
 | --- | --- | --- |
-| PipiClaw | 服务地址、API 密钥 | 使用 PipiClaw 会话和工位上下文。前台空闲时同步当前会话的后台结果。 |
-| Responses API | 服务地址、模型 ID、该服务所需的 API 密钥 | 手机保存对话，每轮发送近期的文字上下文。通过 `POST /responses` 请求 SSE，也接收该端点直接返回的 Responses JSON。 |
+| **PipiClaw** | 服务地址、API 密钥 | 沿用 PipiClaw 服务端会话与工位上下文；前台空闲时自动同步当前会话的后台任务结果。 |
+| **Responses API** | 服务地址、模型 ID、API 密钥 | 对话保存在手机本地，每轮携带近期文字上下文向 `POST /responses` 发起流式请求（也兼容非流式 JSON 返回）。 |
 
-地址可以填写主机、API Base URL 或完整的 Responses 端点。比如 `http://192.168.1.5:8787`、`http://192.168.1.5:8787/v1` 和 `http://192.168.1.5:8787/v1/responses` 指向同一个端点。HTTPS 使用 Android 应用默认的证书信任规则。HTTP 会以明文传输请求和密钥，适合可信网络。
+地址支持填写主机、Base URL 或完整端点，例如 `http://192.168.1.5:8787`、`http://192.168.1.5:8787/v1` 和 `http://192.168.1.5:8787/v1/responses` 均指向同一服务。HTTPS 遵循 Android 系统默认证书信任规则；HTTP 为明文传输，仅建议在可信局域网内使用。
 
-PipiClaw 首次启动默认监听电脑的回环地址。给局域网手机使用时，把已有 `~/.pipiclaw/channel.json` 里的 `webapi.tcp` 改为电脑的局域网监听地址，例如 `192.168.1.5:8787`，保留其余 Web API 配置并重启 PipiClaw。用以下命令为手机创建密钥，默认授权 `default` 工位。
+### 局域网连接本机 PipiClaw
+
+PipiClaw 默认只监听回环地址。若要让同一局域网下的手机连接：
+
+1. 编辑 `~/.pipiclaw/channel.json`，将 `webapi.tcp` 改为电脑的局域网地址（例如 `192.168.1.5:8787`），保留其余配置并重启 PipiClaw。
+2. 为手机生成专用密钥（默认授权 `default` 工位）：
 
 ```bash
 pipiclaw webapi key add turnline-android
 ```
 
-手机填写 `http://192.168.1.5:8787/v1` 和生成的密钥。电脑与手机需要网络互通。PipiClaw 的连接测试检查鉴权和模型端点，普通 Responses 服务的测试会向指定模型发送一次简短请求。PipiClaw 配置细节见 [Web API 文档](https://github.com/oyasmi/pipiclaw/blob/master/docs/webapi.md)。
+3. 在手机端填入 `http://192.168.1.5:8787/v1` 与刚生成的密钥，点击测试连接即可。PipiClaw 侧的完整配置见 [PipiClaw Web API 文档](https://github.com/oyasmi/pipiclaw/blob/master/docs/webapi.md)。
 
-## 通话与文字
+> PipiClaw 模式的连接测试仅检查鉴权与模型端点；通用 Responses API 模式的测试会向目标模型发送一条简短请求。
 
-- 点麦克风开始通话。说完稍作停顿，Turnline 会发送转写文字，读完回复后自动续听。可点「打断」跳过播报或停止等待，点「挂断」回到当前对话的文字输入。
-- 默认使用「仅离线」，调用 Android 的离线识别服务，需要设备支持并安装相应的系统语音包。「系统识别」使用手机的默认语音服务，该服务可能在线处理录音。PipiClaw 和 Responses API 收到的是转写文字。离开应用时会释放麦克风和播报。
-- 点右上角历史图标可恢复对话或开启新对话。PipiClaw 的后台更新进入文字记录。复制、选中文本和单条朗读均可在聊天页操作。
-- API 密钥由 Android Keystore 保护。对话存在应用本机数据库中，按服务配置隔离。删除本机历史仅移除手机上的记录。网络中断时保留已经显示的回复片段，用户可以把失败的输入放回输入框。应用不会自动重发消息。
+## 通话与文字对话
 
-### 选择播报引擎
+- **开始通话**：点击麦克风即可开麦。说完稍作停顿，应用会自动发送转写文字，读完回复后自动续听。播报中可随时点「打断」跳过朗读或停止等待，点「挂断」退回当前会话的文字输入页。
+- **识别方式**：默认为「仅离线」，调用 Android 系统离线语音识别（需设备支持并安装对应离线语音包）；也可切换为「系统识别」，使用手机默认语音服务（可能涉及在线识别）。无论哪种模式，后端收到的始终是转写后的文字。离开应用时会自动释放麦克风与播报资源。
+- **文字与历史**：点右上角历史图标可切换过往对话或开启新会话。PipiClaw 的后台更新会自动进入对话记录。聊天页支持选中复制和单条消息重读。
+- **数据与断网处理**：API 密钥由 Android Keystore 加密保护；历史记录存放在应用本地数据库并按服务配置隔离（删除本地记录不会影响远端）。回复流入期间若网络中断，已收到的内容会完整保留，你可以将未成功的输入放回输入框重试，应用不会擅自重发。
 
-在「连接与语音 → 语音 → 播报引擎」中选择「Matcha · 中英双语」，点「保存并返回」。通话回复和聊天里的「朗读回复」都会使用随 APK 安装的 Matcha 和 Vocos，在手机上离线合成中文、英文及中英混读。第一次播报会加载模型。默认的「系统播报」优先使用手机已安装的本地语音。
+### 开启内置 Matcha 双语播报
+
+前往 **连接与语音 → 语音 → 播报引擎**，选择 **Matcha · 中英双语** 并点击「保存并返回」。此后通话回复与单条朗读均会使用随 APK 打包的 Matcha 与 Vocos，在手机端完全离线合成中文、英文与中英混读（首次播报会短暂加载模型）。默认选项为「系统播报」，优先使用手机已安装的本地语音。
 
 ## 构建
 
-需要 JDK 17 或更新版本、Android SDK Platform 36 及 Python 3.12 或更新版本。安装到真机还需要 Android SDK Platform-Tools 提供的 `adb`。首次构建会从 GitHub 获取 Sherpa-ONNX Android 运行库和 Matcha 模型，可复用仓库根目录 `models/` 中已有的模型。若 Python 不在默认路径，可通过 `-PmatchaPython=/path/to/python` 指定。
+构建前请准备 **JDK 17+**、**Android SDK Platform 36** 与 **Python 3.12+**；安装到真机还需要 Android SDK Platform-Tools 提供的 `adb`。
 
-在 Android Studio 打开 `clients/android/`，或在仓库根目录执行下列命令。两种方式都需要完整的 Turnline 仓库，以便 Gradle 读取共享模型脚本。
+因为 Gradle 需读取仓库根目录共享的模型脚本与 `models/` 缓存，请保持完整的 Turnline 仓库结构。首次构建会自动拉取 Sherpa-ONNX Android 运行库及 Matcha 模型（若仓库根目录已有 `models/`，会直接复用）。如果 Python 不在默认 `PATH` 中，可通过 `-PmatchaPython=/path/to/python` 指定。
+
+你可以直接用 Android Studio 打开 `clients/android/`，或在命令行构建并安装（Windows 使用 `gradlew.bat`）：
 
 ```bash
 cd clients/android
@@ -44,13 +53,21 @@ cd clients/android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Windows 上用 `gradlew.bat` 运行 Gradle。
+构建经过 R8 压缩优化的未签名发布包：
 
-在 `clients/android/` 中运行 `./gradlew :app:assembleRelease`，可构建经过 R8 优化的未签名 APK。正式分发时使用自己的发布密钥签名。
+```bash
+./gradlew :app:assembleRelease
+```
 
-协议回归覆盖地址解析、真实 HTTP 请求形状、SSE 多行与截断、PipiClaw 进展和会话条目、通用 Responses 的 JSON 回退，以及重定向和取消。设置 `TURNLINE_TEST_PIPICLAW_URL` 和 `TURNLINE_TEST_PIPICLAW_KEY` 可让单元测试连接临时 PipiClaw 实例，在同一会话执行两条只读命令。真机通话可用以下方式复测。
+正式分发前请使用自己的发布密钥签名。
 
-1. 在文字模式发送一条消息，再追问一轮，退出应用后重新打开历史。
-2. 开始通话，说一句包含短暂停顿的话。检查转写、自动发送、播报和续听。播报时点「打断」，再说下一句。
-3. 在回复流入时断开网络，或点停止。检查已经到达的文字和下一轮发送。
-4. 在 PipiClaw 模式中用当前会话等待一个后台结果，检查它只出现一次。
+### 测试与真机检查
+
+单元测试覆盖地址解析、HTTP 请求构造、SSE 多行与截断、PipiClaw 进展与会话条目、Responses JSON 回退、重定向及取消逻辑。设置环境变量 `TURNLINE_TEST_PIPICLAW_URL` 和 `TURNLINE_TEST_PIPICLAW_KEY` 后，单元测试还会针对临时 PipiClaw 实例执行同一会话的两轮只读联调。
+
+真机安装后建议按以下路径做一次快速验收：
+
+1. **文字与历史**：发一条消息并追问一轮，退出应用后重新打开，确认历史记录完整恢复。
+2. **通话与打断**：开始通话，说一句带短暂停顿的话，检查转写、自动发送、播报与续听；播报时点「打断」，确认立即停播并可继续说下一句。
+3. **断网恢复**：回复流入过程中断网或点击停止，确认已到达的文字保留，且下一轮发送正常。
+4. **后台结果（PipiClaw 模式）**：在当前会话触发一项后台任务，确认结果返回后仅出现一次。
