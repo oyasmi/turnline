@@ -3,11 +3,14 @@
 import argparse
 import asyncio
 from contextlib import aclosing, asynccontextmanager
+import getpass
 import json
 import logging
 import os
 from pathlib import Path
 import socket
+import ssl
+import sys
 from time import monotonic
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -18,6 +21,11 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse, St
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
+from .auth import (
+    AuthGate, DEFAULT_SESSION_DAYS, LOGIN_BODY_LIMIT, MAX_RESPONSES_SOCKETS, MAX_VOICE_SOCKETS,
+    PasscodeVerifier, WS_AUTH_CLOSE_CODE, WS_LIMIT_CLOSE_CODE, auth_file, client_ip, save_passcode,
+    validate_passcode,
+)
 from .connection import (
     SESSION_SECONDS, Pipiclaw, SessionStore, default_socket, default_state, loopback, normalize_origin, session_cookie,
 )
@@ -25,7 +33,7 @@ from .http_support import ClientStream, error, read_json
 from .speech import RecognitionQueue, SpeechModels
 from .synthesis import SpeechSlot, SynthesisBusy, SynthesisQueue
 from .tls import certificates
-from .voice_session import VoiceSession
+from .voice_session import IDLE_TIMEOUT, VoiceSession
 
 
 PUBLIC = Path(__file__).resolve().parents[1] / "public"
@@ -59,9 +67,10 @@ def browser_origin(scope, headers):
 
 
 class BrowserBoundary:
-    def __init__(self, app, *, demo_mode):
+    def __init__(self, app, *, demo_mode, hsts=False):
         self.app = app
         self.demo_mode = demo_mode
+        self.hsts = hsts
 
     async def __call__(self, scope, receive, send):
         protocol = scope["type"]
@@ -95,6 +104,8 @@ class BrowserBoundary:
                 outgoing["X-Frame-Options"] = "DENY"
                 outgoing["Referrer-Policy"] = "no-referrer"
                 outgoing["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
+                if self.hsts and origin.startswith("https://"):
+                    outgoing["Strict-Transport-Security"] = "max-age=31536000"
                 if path.startswith("/assets/"):
                     outgoing["Cache-Control"] = "no-cache"
                 else:
@@ -210,13 +221,23 @@ async def demo(request: Request):
     return StreamingResponse(events(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
 
-def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=False, direct_only=False):
+def create_app(
+    tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=False, direct_only=False,
+    auth_mode="none", passcode_verifier=None, session_days=DEFAULT_SESSION_DAYS, hsts=False,
+    voice_idle_timeout=IDLE_TIMEOUT, max_voice_sockets=MAX_VOICE_SOCKETS,
+    max_responses_sockets=MAX_RESPONSES_SOCKETS,
+):
     models = SpeechModels(tts_threads=tts_threads)
     slot = SpeechSlot()
     synthesis = SynthesisQueue(models, slot)
     recognition = RecognitionQueue(models, slot)
-    pipiclaw = None if demo_mode or direct_only else Pipiclaw(
-        socket_path or default_socket(), SessionStore(state_dir or default_state())
+    sessions = None if demo_mode else SessionStore(state_dir or default_state())
+    pipiclaw = None if demo_mode or direct_only else Pipiclaw(socket_path or default_socket(), sessions)
+    auth = AuthGate(
+        mode=auth_mode, verifier=passcode_verifier, sessions=sessions,
+        session_seconds=session_days * 86400,
+        max_voice_sockets=max_voice_sockets,
+        max_responses_sockets=max_responses_sockets,
     )
 
     async def warm(name, run):
@@ -235,7 +256,7 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
                 await pipiclaw.client.aclose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
-    app.add_middleware(BrowserBoundary, demo_mode=demo_mode)
+    app.add_middleware(BrowserBoundary, demo_mode=demo_mode, hsts=hsts)
     app.mount("/assets", StaticFiles(directory=PUBLIC))
 
     @app.exception_handler(HTTPException)
@@ -244,9 +265,23 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
 
     async def require_session(request: Request):
         cookie, _ = session_cookie(request)
-        identity = await asyncio.to_thread(pipiclaw.sessions.identity, request.cookies.get(cookie))
+        identity = await asyncio.to_thread(
+            sessions.identity, request.cookies.get(cookie), require_auth=auth.enabled,
+        )
         if not identity:
-            raise HTTPException(401, "浏览器会话尚未就绪，请刷新页面后重试。")
+            message = "请先输入访问口令解锁。" if auth.enabled else "浏览器会话尚未就绪，请刷新页面后重试。"
+            raise HTTPException(401, message)
+        return identity
+
+    async def require_speech_auth(request: Request):
+        if not auth.enabled:
+            return None
+        cookie, _ = session_cookie(request)
+        identity = await asyncio.to_thread(
+            sessions.identity, request.cookies.get(cookie), require_auth=True,
+        )
+        if not identity:
+            raise HTTPException(401, "请先输入访问口令解锁。")
         return identity
 
     @app.api_route("/favicon.ico", methods=["GET", "HEAD"], include_in_schema=False)
@@ -269,15 +304,74 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
     async def session(request: Request):
         if demo_mode:
             return {"connection": "demo"}
+        cookie, secure = session_cookie(request)
+        if auth.enabled:
+            identity, renewed = await asyncio.to_thread(
+                sessions.touch_authenticated, request.cookies.get(cookie), auth.session_seconds,
+            )
+            if not identity:
+                return JSONResponse({"connection": "locked", "auth": "passcode"})
+            if not pipiclaw or request.query_params.get("mode") == "direct":
+                payload = {"connection": "direct", "relay": pipiclaw is not None, "auth": "passcode"}
+            else:
+                payload = {"connection": await pipiclaw.status(), "relay": True, "auth": "passcode"}
+            response = JSONResponse(payload)
+            if renewed:
+                response.set_cookie(cookie, renewed, path="/", max_age=auth.session_seconds,
+                                    secure=secure, httponly=True, samesite="strict")
+            return response
         if not pipiclaw or request.query_params.get("mode") == "direct":
             return {"connection": "direct", "relay": pipiclaw is not None}
-        cookie, secure = session_cookie(request)
-        token = await asyncio.to_thread(pipiclaw.sessions.start, request.cookies.get(cookie))
+        token = await asyncio.to_thread(sessions.start, request.cookies.get(cookie))
         response = JSONResponse({"connection": await pipiclaw.status(), "relay": True})
         if token:
             response.set_cookie(cookie, token, path="/", max_age=SESSION_SECONDS,
                                 secure=secure, httponly=True, samesite="strict")
         return response
+
+    @app.post("/api/auth/login")
+    async def auth_login(request: Request):
+        if not auth.enabled:
+            return error("当前未启用访问口令。", 404)
+        ip = client_ip(request)
+        wait = auth.limiter.check(ip)
+        if wait > 0:
+            response = error(f"尝试次数过多，请 {wait} 秒后重试。", 429)
+            response.headers["Retry-After"] = str(wait)
+            return response
+        body = await read_json(request, limit=LOGIN_BODY_LIMIT)
+        passcode = body.get("passcode") if isinstance(body, dict) else None
+        if not await asyncio.to_thread(auth.verify, passcode):
+            wait = auth.limiter.record_failure(ip)
+            LOG.warning("Auth login failed from %s (lock=%ss)", ip, wait)
+            if wait > 0:
+                response = error(f"尝试次数过多，请 {wait} 秒后重试。", 429)
+                response.headers["Retry-After"] = str(wait)
+                return response
+            return error("访问口令不正确，请重试。", 401)
+        auth.limiter.record_success(ip)
+        token, identity = await asyncio.to_thread(sessions.create_authenticated, auth.session_seconds)
+        LOG.info("Auth login succeeded from %s (device=%s)", ip, identity[:8])
+        cookie, secure = session_cookie(request)
+        response = JSONResponse({"ok": True})
+        response.set_cookie(cookie, token, path="/", max_age=auth.session_seconds,
+                            secure=secure, httponly=True, samesite="strict")
+        return response
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request):
+        cookie, secure = session_cookie(request)
+        if sessions:
+            revoked = await asyncio.to_thread(sessions.revoke_token, request.cookies.get(cookie))
+            if revoked:
+                LOG.info("Auth logout from %s", client_ip(request))
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(cookie, path="/", secure=secure, httponly=True, samesite="strict")
+        return response
+
+    async def reject_ws(ws: WebSocket, code: int):
+        await ws.accept()
+        await ws.close(code=code)
 
     if pipiclaw:
         @app.get("/api/pipiclaw/v1/conversations")
@@ -319,25 +413,46 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
         @app.websocket("/api/pipiclaw/v1/responses")
         async def responses_ws(ws: WebSocket):
             cookie, _ = session_cookie(ws)
-            identity = await asyncio.to_thread(pipiclaw.sessions.identity, ws.cookies.get(cookie))
+            identity = await asyncio.to_thread(
+                sessions.identity, ws.cookies.get(cookie), require_auth=auth.enabled,
+            )
             if not identity:
-                await ws.close(code=1008)
+                if auth.enabled:
+                    await reject_ws(ws, WS_AUTH_CLOSE_CODE)
+                else:
+                    await ws.close(code=1008)
                 return
-            await pipiclaw.responses_ws(ws, identity)
+            with auth.ws_limiter.acquire("responses") as acquired:
+                if not acquired:
+                    await reject_ws(ws, WS_LIMIT_CLOSE_CODE)
+                    return
+                await pipiclaw.responses_ws(ws, identity)
 
     if demo_mode:
         app.add_api_route("/demo/v1/responses", demo, methods=["POST"])
 
     @app.websocket("/speech/voice")
     async def open_socket(ws: WebSocket):
-        await VoiceSession(ws, models, recognition, synthesis).run()
+        if auth.enabled:
+            cookie, _ = session_cookie(ws)
+            identity = await asyncio.to_thread(
+                sessions.identity, ws.cookies.get(cookie), require_auth=True,
+            )
+            if not identity:
+                await reject_ws(ws, WS_AUTH_CLOSE_CODE)
+                return
+        with auth.ws_limiter.acquire("voice") as acquired:
+            if not acquired:
+                await reject_ws(ws, WS_LIMIT_CLOSE_CODE)
+                return
+            await VoiceSession(ws, models, recognition, synthesis, idle_timeout=voice_idle_timeout).run()
 
     @app.get("/speech/info")
-    async def speech_info():
+    async def speech_info(_=Depends(require_speech_auth)):
         return tts_info(models)
 
     @app.post("/speech/prepare")
-    async def prepare():
+    async def prepare(_=Depends(require_speech_auth)):
         try:
             speakers = await asyncio.to_thread(models.prepare_synthesis)
             return {**tts_info(models), "speakers": speakers}
@@ -348,13 +463,60 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
             return error("语音合成模型初始化失败，请查看服务日志。", 500)
 
     @app.post("/speech/synthesize")
-    async def generate(request: Request):
+    async def generate(request: Request, _=Depends(require_speech_auth)):
         return await tts(request, synthesis)
 
     return app
 
 
-def main():
+def run_auth_command(argv):
+    parser = argparse.ArgumentParser(prog="turnline auth", description="Manage Turnline passcode authentication.")
+    sub = parser.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("set-passcode", "Set or update the access passcode and revoke existing sessions"),
+        ("revoke", "Revoke all authenticated browser sessions"),
+        ("status", "Show passcode configuration and active authenticated session count"),
+    ):
+        child = sub.add_parser(name, help=help_text)
+        child.add_argument("--state-dir", type=Path, default=default_state())
+    options = parser.parse_args(argv)
+
+    if options.action == "set-passcode":
+        first = getpass.getpass("请输入新的访问口令（至少 8 位）: ")
+        try:
+            validate_passcode(first)
+        except ValueError as exc:
+            parser.error(str(exc))
+        second = getpass.getpass("请再次输入以确认: ")
+        if first != second:
+            parser.error("两次输入的口令不一致。")
+        target = save_passcode(options.state_dir, first)
+        revoked = SessionStore(options.state_dir).revoke_all_authenticated()
+        print(f"口令已保存到 {target}（已吊销 {revoked} 个旧会话）。", flush=True)
+        return
+
+    if options.action == "revoke":
+        revoked = SessionStore(options.state_dir).revoke_all_authenticated()
+        print(f"已吊销 {revoked} 个已认证会话。", flush=True)
+        return
+
+    if options.action == "status":
+        configured = auth_file(options.state_dir).exists()
+        env_configured = bool(os.environ.get("TURNLINE_PASSCODE_FILE") or os.environ.get("TURNLINE_PASSCODE"))
+        active = SessionStore(options.state_dir).authenticated_count()
+        print(f"状态目录: {options.state_dir}", flush=True)
+        print(f"口令文件: {'已配置' if configured else '未配置'} ({auth_file(options.state_dir)})", flush=True)
+        if env_configured:
+            print("环境变量口令: 已配置", flush=True)
+        print(f"已认证会话数: {active}", flush=True)
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args and args[0] == "auth":
+        run_auth_command(args[1:])
+        return
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=("serve",), default="serve")
     parser.add_argument("--host", default="127.0.0.1")
@@ -367,9 +529,13 @@ def main():
     parser.add_argument("--state-dir", type=Path, default=default_state())
     parser.add_argument("--pipiclaw-socket", type=Path, default=default_socket())
     parser.add_argument("--direct-only", action="store_true", help="Disable the server-side Pipiclaw relay")
+    parser.add_argument("--auth", choices=("none", "passcode"), default=None,
+                        help="Access control mode (required when binding a non-loopback address)")
+    parser.add_argument("--session-days", type=int, default=DEFAULT_SESSION_DAYS,
+                        help="Authenticated cookie lifetime in days when --auth passcode is enabled")
     parser.add_argument("--tts-threads", type=int, default=2)
     parser.add_argument("--demo", action="store_true")
-    options = parser.parse_args()
+    options = parser.parse_args(args)
 
     address = f"[{options.host}]" if ":" in options.host else options.host
     local_listener = loopback(options.host)
@@ -377,8 +543,12 @@ def main():
         public_url = normalize_origin(options.public_url) if options.public_url else None
         if not 0 <= options.port <= 65535:
             raise ValueError("Port must be between 0 and 65535.")
+        if not 1 <= options.session_days <= 365:
+            raise ValueError("--session-days must be between 1 and 365.")
         if options.demo and not local_listener:
             raise ValueError("--demo requires a loopback listener.")
+        if options.demo and options.auth == "passcode":
+            raise ValueError("--demo cannot be used with --auth passcode.")
         if options.demo and (options.direct_only
                              or (public_url and not loopback(urlsplit(public_url).hostname))):
             raise ValueError("--demo is only for a standalone loopback session.")
@@ -386,6 +556,19 @@ def main():
             raise ValueError("--tts-threads must be at least 1.")
         if bool(options.tls_cert) != bool(options.tls_key):
             raise ValueError("--tls-cert and --tls-key must be supplied together.")
+        auth_mode = options.auth
+        if auth_mode is None:
+            if local_listener:
+                auth_mode = "none"
+            else:
+                raise ValueError("A non-loopback listener requires explicitly setting --auth passcode or --auth none.")
+        verifier = None
+        if auth_mode == "passcode":
+            verifier = PasscodeVerifier.load(options.state_dir)
+            if verifier is None:
+                raise ValueError(
+                    "已启用 --auth passcode，但尚未配置口令。请先运行：uv run python server.py auth set-passcode"
+                )
         if options.self_signed:
             if options.tls_cert:
                 raise ValueError("Choose a supplied certificate or --self-signed.")
@@ -399,11 +582,17 @@ def main():
         if not local_listener and not options.tls_cert:
             raise ValueError("A non-loopback listener requires a TLS certificate.")
 
-        app = create_app(options.tts_threads, socket_path=options.pipiclaw_socket, state_dir=options.state_dir,
-                         demo_mode=options.demo, direct_only=options.direct_only)
+        hsts = bool(options.tls_cert and not options.self_signed)
+        app = create_app(
+            options.tts_threads, socket_path=options.pipiclaw_socket, state_dir=options.state_dir,
+            demo_mode=options.demo, direct_only=options.direct_only,
+            auth_mode=auth_mode, passcode_verifier=verifier, session_days=options.session_days, hsts=hsts,
+        )
         config = uvicorn.Config(
             app, host=options.host, port=options.port, proxy_headers=False, access_log=False, workers=1,
             ssl_certfile=options.tls_cert, ssl_keyfile=options.tls_key,
+            ssl_version=ssl.PROTOCOL_TLS_SERVER,
+            limit_concurrency=64, timeout_keep_alive=30, backlog=128,
             ws="websockets-sansio", ws_max_size=65536,
         )
         config.load()

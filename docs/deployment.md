@@ -41,25 +41,52 @@ ssh -N -L 8686:127.0.0.1:8686 user@turnline-host
 - 保留原始 `Host` 头；当代理从回环地址连接 Turnline 时，也可通过 `X-Forwarded-Host` 与 `X-Forwarded-Proto` 传递外部主机和协议。
 - 为 Turnline 分配独立域名或端口，挂载在根路径 `/` 下。
 
-> **安全提示**：启用服务端中转时，任何能够访问 Turnline 入口的人都可以借此操作本机 PipiClaw。Turnline 的浏览器 Cookie 仅用于隔离不同浏览器的会话，**不负责入口鉴权**。请仅向可信网络开放，或在反向代理层配置访问控制。
+> **安全提示**：启用服务端中转时，任何能够访问 Turnline 入口的人都可以借此操作本机 PipiClaw。Turnline 默认的匿名浏览器 Cookie 仅用于隔离不同浏览器的会话。暴露到局域网或公网时，请启用内置的 `--auth passcode` 访问控制（或在反向代理层配置访问控制）。
 
-### 方案三：Turnline 直接提供 HTTPS
+### 方案三：Turnline 直接提供 HTTPS（推荐单进程内网 / 公网部署）
 
-如果你已有受信任的 PEM 证书链与私钥，可直接交由 Turnline 监听：
+Turnline 可直接提供 HTTPS 与内置口令访问控制，无需额外部署 Caddy 或 Nginx。
+
+1. **先设置访问口令**（口令以 `scrypt` 加盐哈希保存在状态目录的 `auth.json`，权限 `0600`）：
 
 ```bash
-uv run python server.py --host 0.0.0.0 \
-  --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+uv run python server.py auth set-passcode
 ```
 
-在可信局域网内，也可以让 Turnline 自动生成本地 CA 并签发服务端证书（需要系统安装 OpenSSL 且支持 `fcntl`）。将下方地址替换为设备实际访问的 IP 或主机名：
+2. **公网部署**（使用受信任的 PEM 证书链与私钥，如 Let's Encrypt，自动开启 HSTS）：
+
+```bash
+uv run python server.py --host 0.0.0.0 --port 8686 \
+  --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem \
+  --state-dir ~/.local/state/turnline-public \
+  --auth passcode --session-days 14
+```
+
+3. **内网 / 局域网部署**（让 Turnline 自动生成本地 CA 并签发服务端证书，需要系统安装 OpenSSL 且支持 `fcntl`）：
 
 ```bash
 uv run python server.py --host 0.0.0.0 --self-signed \
-  --public-url https://192.168.1.5:8686
+  --public-url https://192.168.1.5:8686 --auth passcode
 ```
 
-启动后，程序会打印本地 CA 证书路径。将该 CA 证书导入手机或电脑的系统信任库后，即可正常打开该 HTTPS 地址并使用麦克风。后续重启会自动复用状态目录中的 CA 与有效证书。
+启动后，程序会打印本地 CA 证书路径。将该 CA 证书导入手机或电脑的系统信任库后，即可正常打开该 HTTPS 地址并使用麦克风。后续重启会自动复用状态目录中的 CA 与有效证书。若纯个人可信局域网不需要口令，可显式传入 `--auth none`。
+
+### 访问控制与会话管理
+
+启用 `--auth passcode` 后，未解锁的浏览器只能访问静态页面，所有 PipiClaw 中转接口与语音接口（含 WebSocket）均会被拦截；登录接口内置单 IP 渐进锁定与全局防爆破保护。
+
+```bash
+# 查看口令配置状态与当前已认证会话数
+uv run python server.py auth status [--state-dir DIR]
+
+# 修改访问口令（会自动吊销所有旧会话）
+uv run python server.py auth set-passcode [--state-dir DIR]
+
+# 一键吊销所有已登录设备（设备丢失时使用）
+uv run python server.py auth revoke [--state-dir DIR]
+```
+
+也支持通过环境变量 `TURNLINE_PASSCODE_FILE`（推荐，配合 systemd `LoadCredential`）或 `TURNLINE_PASSCODE` 提供口令，优先级高于 `auth.json`。
 
 ## 启动参数与环境变量
 
@@ -67,9 +94,12 @@ uv run python server.py --host 0.0.0.0 --self-signed \
 
 | 参数 / 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--host`、`--port` | `127.0.0.1`、`8686` | 监听地址与端口。监听非回环地址时必须提供 TLS 证书或 `--self-signed`。 |
+| `--host`、`--port` | `127.0.0.1`、`8686` | 监听地址与端口。监听非回环地址时必须提供 TLS 证书或 `--self-signed`，且必须显式指定 `--auth`。 |
+| `--auth` | 回环默认 `none` | 访问控制模式，可选 `none` 或 `passcode`。非回环监听时必须显式指定。 |
+| `--session-days` | `30` | `--auth passcode` 模式下已认证 Cookie 的有效期（1–365 天，支持滑动续期）。 |
+| `TURNLINE_PASSCODE_FILE` / `TURNLINE_PASSCODE` | 无 | 可选环境变量口令来源，覆盖状态目录中的 `auth.json`。 |
 | `--pipiclaw-socket` / `PIPICLAW_HOME` | `~/.pipiclaw/state/webapi/api.sock` | 显式指定 Socket 路径，或通过 `PIPICLAW_HOME` 定位 `state/webapi/api.sock`。 |
-| `--state-dir` / `XDG_STATE_HOME` | `~/.local/state/turnline/` | 存放中转会话数据库与本地自签证书；设置 `XDG_STATE_HOME` 时落于其 `turnline/` 子目录。 |
+| `--state-dir` / `XDG_STATE_HOME` | `~/.local/state/turnline/` | 存放会话数据库、口令哈希 `auth.json` 与本地自签证书；设置 `XDG_STATE_HOME` 时落于其 `turnline/` 子目录。 |
 | `--public-url` / `TURNLINE_PUBLIC_URL` | 无 | 指定启动日志中显示的访问地址，也作为 `--self-signed` 签发证书的主机名来源。 |
 | `--direct-only` | 关闭 | 禁用服务端 PipiClaw 中转，仅提供浏览器直连。 |
 | `--tts-threads` | `2` | 语音合成推理线程数。 |

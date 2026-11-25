@@ -5,8 +5,9 @@ function wsUrl(httpBase) {
 }
 
 export class ResponsesSocket {
-  constructor(url) {
+  constructor(url, { onAuthRequired } = {}) {
     this.url = url;
+    this.onAuthRequired = onAuthRequired;
     this.ws = undefined;
     this.connecting = undefined;
     this.activeResponseId = undefined;
@@ -47,7 +48,7 @@ export class ResponsesSocket {
         reject(new Error('无法建立 WebSocket 连接。'));
       }, { once: true });
       ws.addEventListener('message', event => this.onMessage(event.data));
-      ws.addEventListener('close', () => this.onClose(ws));
+      ws.addEventListener('close', event => this.onClose(ws, event));
     }).finally(() => {
       if (this.connecting === attempt) this.connecting = undefined;
     });
@@ -76,7 +77,7 @@ export class ResponsesSocket {
     if (this.consumer) this.consumer.push(event);
   }
 
-  onClose(ws) {
+  onClose(ws, event) {
     if (this.ws === ws) this.ws = undefined;
     this.activeResponseId = undefined;
     if (this.consumer) {
@@ -84,6 +85,7 @@ export class ResponsesSocket {
       this.consumer = undefined;
       current.end();
     }
+    if (event?.code === 4401) this.onAuthRequired?.();
   }
 
   async *create(payload, signal) {

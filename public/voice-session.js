@@ -88,11 +88,25 @@ export class VoiceSession {
           this.onEvent(event);
         }
       };
-      socket.onclose = () => {
-        finish(new Error('无法连接语音服务，请检查网络后重试。'));
+      socket.onclose = event => {
+        const authClosed = event?.code === 4401;
+        const limitClosed = event?.code === 4429;
+        finish(new Error(
+          authClosed ? '会话已失效，请重新输入访问口令。'
+            : limitClosed ? '语音连接数已达上限，请关闭其他标签页后重试。'
+              : '无法连接语音服务，请检查网络后重试。',
+        ));
         if (this.socket !== socket || signal.aborted) return;
         this.ready = false;
         clearInterval(this.heartbeat);
+        if (authClosed) {
+          this.onEvent({ type: 'auth-required' });
+          return;
+        }
+        if (limitClosed) {
+          this.onEvent({ type: 'fatal', message: '语音连接数已达上限，请关闭其他标签页后重试。' });
+          return;
+        }
         if (accepted && !this.reconnecting) {
           if (this.inCall) void this.reconnect(signal);
           else this.onEvent({ type: 'warm-disconnected' });

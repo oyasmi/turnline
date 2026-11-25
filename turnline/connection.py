@@ -85,6 +85,11 @@ class SessionStore:
         with closing(self.open()) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, expires INTEGER);
+                CREATE TABLE IF NOT EXISTS authenticated_devices (
+                    device TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+                    created_at INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE
                 );
@@ -112,12 +117,80 @@ class SessionStore:
             db.execute("INSERT INTO devices VALUES (?, ?)", (digest(token), now + SESSION_SECONDS))
             return token
 
-    def identity(self, token):
+    def create_authenticated(self, session_seconds):
+        now = int(time())
+        token = token_urlsafe(32)
+        identity = digest(token)
+        with closing(self.open()) as db, db:
+            db.execute(
+                "DELETE FROM authenticated_devices WHERE device IN (SELECT id FROM devices WHERE expires <= ?)",
+                (now,),
+            )
+            db.execute("INSERT INTO devices VALUES (?, ?)", (identity, now + session_seconds))
+            db.execute("INSERT INTO authenticated_devices VALUES (?, ?, ?)", (identity, now, now))
+        return token, identity
+
+    def touch_authenticated(self, token, session_seconds):
+        """Verify an authenticated session and return (identity, renewed_token_or_None)."""
+        if not token or not TOKEN.fullmatch(token):
+            return None, None
+        now = int(time())
+        identity = digest(token)
+        renew_window = max(3600, min(RENEW_WINDOW, session_seconds // 4))
+        with closing(self.open()) as db, db:
+            row = db.execute("""
+                SELECT d.expires FROM devices d
+                JOIN authenticated_devices a ON a.device = d.id
+                WHERE d.id = ? AND d.expires > ?
+            """, (identity, now)).fetchone()
+            if not row:
+                return None, None
+            db.execute("UPDATE authenticated_devices SET last_seen = ? WHERE device = ?", (now, identity))
+            if row[0] <= now + renew_window:
+                db.execute("UPDATE devices SET expires = ? WHERE id = ?", (now + session_seconds, identity))
+                return identity, token
+            return identity, None
+
+    def revoke_token(self, token):
+        if not token or not TOKEN.fullmatch(token):
+            return False
+        identity = digest(token)
+        with closing(self.open()) as db, db:
+            removed = db.execute("DELETE FROM authenticated_devices WHERE device = ?", (identity,)).rowcount
+            if removed:
+                db.execute("UPDATE devices SET expires = 0 WHERE id = ?", (identity,))
+            return bool(removed)
+
+    def revoke_all_authenticated(self):
+        with closing(self.open()) as db, db:
+            db.execute(
+                "UPDATE devices SET expires = 0 WHERE id IN (SELECT device FROM authenticated_devices)"
+            )
+            return db.execute("DELETE FROM authenticated_devices").rowcount
+
+    def authenticated_count(self):
+        now = int(time())
+        with closing(self.open()) as db:
+            row = db.execute("""
+                SELECT COUNT(*) FROM devices d
+                JOIN authenticated_devices a ON a.device = d.id
+                WHERE d.expires > ?
+            """, (now,)).fetchone()
+        return row[0] if row else 0
+
+    def identity(self, token, *, require_auth=False):
         if not token or not TOKEN.fullmatch(token):
             return None
         identity = digest(token)
         with closing(self.open()) as db:
-            row = db.execute("SELECT 1 FROM devices WHERE id = ? AND expires > ?", (identity, int(time()))).fetchone()
+            if require_auth:
+                row = db.execute("""
+                    SELECT 1 FROM devices d
+                    JOIN authenticated_devices a ON a.device = d.id
+                    WHERE d.id = ? AND d.expires > ?
+                """, (identity, int(time()))).fetchone()
+            else:
+                row = db.execute("SELECT 1 FROM devices WHERE id = ? AND expires > ?", (identity, int(time()))).fetchone()
         return identity if row else None
 
     def own(self, conversation, device):

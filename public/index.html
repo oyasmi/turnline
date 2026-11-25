@@ -31,6 +31,7 @@
     <section id="connection-panel" class="connection-panel" aria-label="连接状态">
       <p id="connection-detail">正在检查连接。</p>
       <button id="retry-connection" type="button" class="button subtle" hidden>重试连接</button>
+      <button id="unlock-auth" type="button" class="button subtle" hidden>输入口令</button>
       <button id="setup-direct" type="button" class="button subtle" hidden>设置直连</button>
     </section>
 
@@ -253,7 +254,25 @@
       <div class="dialog-actions">
         <a id="switch-mode" class="button subtle" href="/direct" hidden>浏览器直连</a>
         <button id="edit-direct" class="button subtle" type="button" hidden>直连设置</button>
+        <button id="logout-auth" class="button subtle" type="button" hidden>退出此设备</button>
         <button class="button primary" type="submit">保存设置</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="auth-dialog" aria-labelledby="auth-title">
+    <form id="auth-form">
+      <header class="panel-heading">
+        <h2 id="auth-title">访问验证</h2>
+      </header>
+      <div class="fields">
+        <p class="dialog-copy">此 Turnline 实例已启用口令保护，请输入访问口令解锁当前设备。</p>
+        <label>访问口令
+          <input id="auth-passcode" type="password" placeholder="请输入访问口令" autocomplete="current-password" required>
+        </label>
+      </div>
+      <p id="auth-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="auth-submit" class="button primary" type="submit">解锁</button>
       </div>
     </form>
   </dialog>

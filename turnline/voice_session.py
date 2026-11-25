@@ -17,6 +17,7 @@ from .turn_engine import DEFAULT_MIN_VOICE_SECONDS, MIN_VOICE_SECONDS, RESPONSE_
 LOG = logging.getLogger("turnline")
 SPEECH_RATES = (0.9, 1.0, 1.07, 1.15)
 MAX_SAY_QUEUE = 64
+IDLE_TIMEOUT = 300
 
 
 def integer(value, maximum):
@@ -26,10 +27,11 @@ def integer(value, maximum):
 
 
 class VoiceSession:
-    def __init__(self, socket, models, recognition, synthesis):
+    def __init__(self, socket, models, recognition, synthesis, *, idle_timeout=IDLE_TIMEOUT):
         self.socket = socket
         self.models = models
         self.synthesis = synthesis
+        self.idle_timeout = idle_timeout
         self.send_lock = asyncio.Lock()
         self.input = TurnEngine(recognition, self.send)
         self.queue = deque()
@@ -43,7 +45,14 @@ class VoiceSession:
             await self.socket.send_json(event)
 
     async def receive(self):
-        while (message := await self.socket.receive())["type"] != "websocket.disconnect":
+        while True:
+            try:
+                message = await asyncio.wait_for(self.socket.receive(), timeout=self.idle_timeout)
+            except TimeoutError:
+                LOG.info("Closing idle voice session after %ss", self.idle_timeout)
+                return
+            if message["type"] == "websocket.disconnect":
+                return
             if message.get("bytes") is not None:
                 await self.input.accept(message["bytes"])
                 continue

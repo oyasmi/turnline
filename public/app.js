@@ -54,6 +54,7 @@ const diagnostics = $('diagnostics');
 const ACTIVE_CONVERSATION = 'turnline.active-conversation.v1';
 const directMode = location.pathname === '/direct';
 const directDialog = $('direct-settings');
+const authDialog = $('auth-dialog');
 const relay = { mode: 'relay', url: '/api/pipiclaw/v1', model: 'pipiclaw', context: 'conversation' };
 
 let settings = {
@@ -63,6 +64,8 @@ let connection = 'checking';
 let connectionDetail;
 let connectionGeneration = 0;
 let relayAvailable = false;
+let authMode = 'none';
+let authCooldownTimer;
 let conversation;
 let conversationTitled = false;
 let opening;
@@ -140,6 +143,7 @@ function renderConnection() {
     checking: { label: '正在连接', detail: '正在检查连接。' },
     ready: { label: 'PipiClaw 已连接', detail: '' },
     setup: { label: '等待设置', detail: '填写你自己的 PipiClaw 地址和 Key。' },
+    locked: { label: '需要验证', detail: '请输入访问口令以解锁当前设备。' },
     offline: { label: 'PipiClaw 离线', detail: '请启动 PipiClaw，再重试连接。' },
     demo: { label: '离线演示', detail: '' },
   }[connection];
@@ -148,9 +152,11 @@ function renderConnection() {
   $('connection-panel').hidden = !detail;
   $('connection-detail').textContent = connectionDetail ?? detail;
   $('retry-connection').hidden = connection !== 'offline';
+  $('unlock-auth').hidden = connection !== 'locked';
+  $('logout-auth').hidden = authMode !== 'passcode' || connection === 'locked';
   $('setup-direct').hidden = !directMode || !['setup', 'offline'].includes(connection);
   $('edit-direct').hidden = !directMode;
-  $('switch-mode').hidden = !relayAvailable;
+  $('switch-mode').hidden = !relayAvailable || connection === 'locked';
   $('switch-mode').href = directMode ? '/' : '/direct';
   $('switch-mode').textContent = directMode ? '服务端中转' : '浏览器直连';
   $('open-conversations').hidden = connection !== 'ready' || settings.context !== 'conversation';
@@ -224,11 +230,15 @@ async function refreshConnection(directChecked = false) {
     const path = directMode ? '/api/session?mode=direct' : '/api/session';
     const response = await fetch(path, { signal: AbortSignal.timeout(7_000), cache: 'no-store' });
     if (!response.ok) throw new Error('Connection check failed.');
-    const { connection: state, relay: available } = await response.json();
-    if (!['ready', 'offline', 'demo', 'direct'].includes(state)) throw new Error('Bad connection state.');
+    const { connection: state, relay: available, auth } = await response.json();
+    if (!['ready', 'offline', 'demo', 'direct', 'locked'].includes(state)) throw new Error('Bad connection state.');
     if (generation !== connectionGeneration) return;
+    authMode = auth === 'passcode' ? 'passcode' : 'none';
     relayAvailable = available === true;
     connection = state;
+    if (state === 'locked') {
+      openAuthDialog();
+    }
     if (state === 'demo') settings = { ...settings, mode: 'demo', model: 'demo', url: '/demo/v1', context: 'history' };
     if (state === 'direct') {
       connection = 'setup';
@@ -612,6 +622,10 @@ function onPlayback(event) {
 }
 
 function onVoice(event) {
+  if (event.type === 'auth-required') {
+    handleAuthRequired();
+    return;
+  }
   if (event.type === 'warm-disconnected') return;
   if (!call) return;
   if (event.type === 'rtt') {
@@ -791,7 +805,7 @@ function ensureResponsesSocket() {
   if (settings.mode !== 'relay' || settings.context !== 'conversation' || !('WebSocket' in window)) return undefined;
   if (!responsesSocket || responsesSocket.url !== settings.url) {
     responsesSocket?.close();
-    responsesSocket = new ResponsesSocket(settings.url);
+    responsesSocket = new ResponsesSocket(settings.url, { onAuthRequired: handleAuthRequired });
   }
   return responsesSocket;
 }
@@ -967,6 +981,8 @@ async function send(text, timing, display, quiet = false) {
           connection = 'setup';
           connectionDetail = directFailure(error);
           renderConnection();
+        } else if (authMode === 'passcode') {
+          handleAuthRequired();
         } else {
           showError('正在刷新浏览器会话，请稍后重新发送。');
           void refreshConnection();
@@ -1019,6 +1035,92 @@ bindConversationHistory({
   select: selectConversation,
   onDeleteCurrent: () => newSession({ forget: true }),
 });
+
+function openAuthDialog(detail) {
+  if (detail) connectionDetail = detail;
+  showError(undefined, $('auth-error'));
+  $('auth-passcode').value = '';
+  if (!authDialog.open) authDialog.showModal();
+  $('auth-passcode').focus();
+}
+
+function handleAuthRequired(detail = '会话已失效，请重新输入访问口令。') {
+  authMode = 'passcode';
+  hangUp();
+  responsesSocket?.close();
+  newSession({ forget: false });
+  connection = 'locked';
+  connectionDetail = detail;
+  renderConnection();
+  openAuthDialog(detail);
+}
+
+function startAuthCooldown(seconds) {
+  clearInterval(authCooldownTimer);
+  let remaining = Math.max(1, Math.ceil(seconds));
+  const submit = $('auth-submit');
+  const tick = () => {
+    if (remaining <= 0) {
+      clearInterval(authCooldownTimer);
+      authCooldownTimer = undefined;
+      submit.disabled = false;
+      submit.textContent = '解锁';
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = `${remaining} 秒后重试`;
+    remaining--;
+  };
+  tick();
+  authCooldownTimer = setInterval(tick, 1000);
+}
+
+$('auth-form').onsubmit = async event => {
+  event.preventDefault();
+  if (authCooldownTimer) return;
+  const passcode = $('auth-passcode').value;
+  if (!passcode) return;
+  const submit = $('auth-submit');
+  submit.disabled = true;
+  showError(undefined, $('auth-error'));
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ passcode }),
+      signal: AbortSignal.timeout(7_000),
+    });
+    if (response.ok) {
+      $('auth-passcode').value = '';
+      authDialog.close();
+      void refreshConnection();
+      return;
+    }
+    const payload = await response.json().catch(() => null);
+    showError(payload?.error?.message ?? '访问验证失败，请重试。', $('auth-error'));
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get('retry-after')) || 60;
+      startAuthCooldown(retryAfter);
+    } else {
+      $('auth-passcode').select();
+      $('auth-passcode').focus();
+    }
+  } catch {
+    showError('无法连接 Turnline，请稍后重试。', $('auth-error'));
+  } finally {
+    if (!authCooldownTimer) submit.disabled = false;
+  }
+};
+$('unlock-auth').onclick = () => openAuthDialog();
+$('logout-auth').onclick = async () => {
+  dialog.close();
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', signal: AbortSignal.timeout(5_000) });
+  } catch {
+    // Even if offline, clear local state and lock UI.
+  }
+  handleAuthRequired('已退出当前设备，请重新输入访问口令。');
+};
 
 function openSettings() {
   $('instructions').value = settings.instructions;
@@ -1196,6 +1298,11 @@ function replayMessage(display) {
   try { context = new AudioContext({ latencyHint: 'interactive' }); }
   catch { showError('当前浏览器无法重播语音。'); return; }
   const session = new VoiceSession(event => {
+    if (event.type === 'auth-required') {
+      stopReplay();
+      handleAuthRequired();
+      return;
+    }
     if (event.type === 'fatal' || event.type === 'warm-disconnected') {
       stopReplay();
       showError(event.message ?? '重播时语音连接已断开。');
