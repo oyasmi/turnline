@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
@@ -154,10 +155,19 @@ fun TurnlineApp(model: TurnlineViewModel) {
         draftText = value
     }
 
+    val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    var askedNotification by rememberSaveable { mutableStateOf(false) }
+
     fun startCall() {
         focus.clearFocus()
         keyboard?.hide()
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !askedNotification &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedNotification = true
+            notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             model.startCall()
         } else microphone.launch(Manifest.permission.RECORD_AUDIO)
@@ -248,8 +258,12 @@ fun TurnlineApp(model: TurnlineViewModel) {
                         }
                         if (state.settings != null && !state.inCall) {
                             Composer(
-                                input, { if (it.length <= MAX_INPUT) changeInput(it) }, state.busy,
-                                onVoice = ::startCall, onStop = model::stopResponse,
+                                input = input,
+                                change = { if (it.length <= MAX_INPUT) changeInput(it) },
+                                busy = state.busy,
+                                canSteer = state.canSteer,
+                                onVoice = ::startCall,
+                                onStop = model::stopResponse,
                                 onSend = {
                                     if (model.send(input)) {
                                         changeInput("")
@@ -759,9 +773,16 @@ private fun Notice(message: String, restore: (() -> Unit)?, dismiss: () -> Unit)
 
 @Composable
 private fun Composer(
-    input: String, change: (String) -> Unit, busy: Boolean, onVoice: () -> Unit, onStop: () -> Unit, onSend: () -> Unit
+    input: String,
+    change: (String) -> Unit,
+    busy: Boolean,
+    canSteer: Boolean,
+    onVoice: () -> Unit,
+    onStop: () -> Unit,
+    onSend: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
+    val steerSend = busy && canSteer && input.isNotBlank() && !input.trimStart().startsWith("/")
     val showAction = busy || input.isNotBlank()
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 11.dp),
@@ -786,15 +807,28 @@ private fun Composer(
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 decorationBox = { inner ->
                     Box {
-                        if (input.isEmpty()) Text("发送消息", color = colors.onSurfaceVariant, fontSize = 16.sp, lineHeight = 23.sp)
+                        if (input.isEmpty()) {
+                            Text(
+                                if (busy && canSteer) "补充要求以引导当前任务" else "发送消息",
+                                color = colors.onSurfaceVariant,
+                                fontSize = 16.sp,
+                                lineHeight = 23.sp
+                            )
+                        }
                         inner()
                     }
                 }
             )
             if (showAction) {
                 SmallButton(
-                    if (busy) Glyph.STOP else Glyph.SEND, if (busy) "停止回复" else "发送",
-                    if (busy) onStop else onSend, tint = colors.primary
+                    if (busy && !steerSend) Glyph.STOP else Glyph.SEND,
+                    when {
+                        steerSend -> "发送补充引导"
+                        busy -> "停止回复"
+                        else -> "发送"
+                    },
+                    if (busy && !steerSend) onStop else onSend,
+                    tint = colors.primary
                 )
             }
         }

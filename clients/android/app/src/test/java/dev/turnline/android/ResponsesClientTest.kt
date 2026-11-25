@@ -210,7 +210,7 @@ class ResponsesClientTest {
                 conversationId = "conv_one",
                 messages = listOf(Message(role = Role.USER, text = "继续")),
                 voice = false,
-                onResponseCreated = { createdId = it }
+                onResponseCreated = { id, _ -> createdId = id }
             ) {}
             assertEquals("resp_123", createdId)
             assertEquals(listOf(Output("m1", "前半句，后半句。")), result)

@@ -5,6 +5,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.TreeMap
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 import kotlin.coroutines.resume
@@ -69,6 +70,16 @@ class ResponsesClient(
         .followSslRedirects(false)
         .build()
 ) {
+    private val ws = ResponsesWebSocket(http)
+
+    fun steerActiveResponse(input: String, targetId: String? = null): Boolean =
+        ws.steer(input, targetId ?: ws.activeResponseId)
+
+    fun cancelActiveWebSocketResponse(responseId: String? = null): Boolean =
+        ws.cancel(responseId ?: ws.activeResponseId)
+
+    fun closeWebSocket() = ws.close()
+
     suspend fun check(settings: ServiceSettings) {
         if (settings.usesConversation) {
             val url = sibling(settings, "models", "pipiclaw")
@@ -161,12 +172,37 @@ class ResponsesClient(
         voice: Boolean,
         instructions: String? = null,
         background: Boolean = conversationId != null,
-        onResponseCreated: ((String) -> Unit)? = null,
+        preferWebSocket: Boolean = false,
+        onResponseCreated: ((String, Boolean) -> Unit)? = null,
+        onSteerFailed: (() -> Unit)? = null,
         onDraft: (ResponseDraft) -> Unit
     ): List<Output> {
-        val body = JSONObject().put("model", settings.model).put("stream", true)
         val resolvedInstructions = instructions?.takeIf { it.isNotBlank() }
             ?: if (voice) VOICE_INSTRUCTIONS else null
+
+        if (preferWebSocket && conversationId != null && settings.usesConversation) {
+            val wsPayload = JSONObject()
+                .put("model", settings.model)
+                .put("conversation", conversationId)
+                .put("input", messages.last().text)
+                .apply {
+                    if (resolvedInstructions != null) put("instructions", resolvedInstructions)
+                }
+            val wsState = StreamState(onResponseCreated = { id -> onResponseCreated?.invoke(id, true) })
+            try {
+                val result = ws.sendTurn(settings, wsPayload, wsState, onDraft, onSteerFailed)
+                return result.ifEmpty { throw ApiFailure("服务已完成请求，但没有返回可显示的文字。") }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                if (wsState.responseId != null) {
+                    throw displayFailure(error, settings.key)
+                }
+                ws.close()
+                // Fall back seamlessly to HTTP SSE when WebSocket is unavailable before turn creation.
+            }
+        }
+
+        val body = JSONObject().put("model", settings.model).put("stream", true)
         if (resolvedInstructions != null) body.put("instructions", resolvedInstructions)
         if (conversationId != null) {
             if (background) body.put("background", true)
@@ -179,7 +215,7 @@ class ResponsesClient(
             body.put("store", false).put("input", input)
         }
 
-        val state = StreamState(onResponseCreated = onResponseCreated)
+        val state = StreamState(onResponseCreated = { id -> onResponseCreated?.invoke(id, false) })
         var initialError: ApiFailure? = null
         try {
             return execute(request(settings, settings.url, body)) { response ->
@@ -313,7 +349,7 @@ private fun httpError(code: Int, detail: String?, retryAfter: Int? = null): Stri
     return if (detail.isNullOrBlank()) hint else "$hint\n${detail.take(260)}"
 }
 
-private fun displayFailure(error: Exception, key: String): ApiFailure = when (error) {
+internal fun displayFailure(error: Exception, key: String): ApiFailure = when (error) {
     is ApiFailure -> ApiFailure(
         (error.message ?: "请求失败。").let { if (key.isBlank()) it else it.replace(key, "••••") }.take(480),
         error.status,
@@ -393,11 +429,14 @@ internal class DraftItem(
         .trim().takeIf(String::isNotEmpty)?.let { Output(id, it) }
 }
 
+private val OUTPUT_KEY_COMPARATOR = compareBy<Pair<Int, Int>>({ it.first }, { it.second })
+
 internal class StreamState(
     val onResponseCreated: ((String) -> Unit)? = null
 ) {
-    val output = sortedMapOf<Int, DraftItem>()
-    val activeTools = linkedMapOf<Int, String>()
+    val output = TreeMap<Pair<Int, Int>, DraftItem>(OUTPUT_KEY_COMPARATOR)
+    val activeTools = linkedMapOf<Pair<Int, Int>, String>()
+    var generation: Int = 0
     var phase: String = "正在等待回复"
     var received: Int = 0
     var responseId: String? = null
@@ -411,6 +450,129 @@ internal class StreamState(
         ResponseDraft(phase, outputs, failureNotice)
 
     fun canResume(): Boolean = streamDisrupted && responseId != null && lastSequence != null
+}
+
+internal fun applyStreamEvent(
+    type: String?,
+    event: JSONObject,
+    state: StreamState,
+    publish: (Boolean) -> Unit,
+    onTerminalPartial: (List<Output>) -> Unit
+): List<Output>? {
+    if (event.has("sequence_number") && !event.isNull("sequence_number")) {
+        val seq = event.optInt("sequence_number", -1)
+        if (seq >= 0) state.lastSequence = seq
+    }
+
+    fun item(ev: JSONObject): DraftItem {
+        val index = ev.optInt("output_index", 0)
+        if (index !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的回复条目过多。")
+        return state.output.getOrPut(state.generation to index, ::DraftItem).apply {
+            id = ev.string("item_id") ?: id
+        }
+    }
+
+    when (type) {
+        "response.created" -> {
+            val createdId = event.optJSONObject("response")?.string("id")
+            if (createdId != null) {
+                state.responseId = createdId
+                state.onResponseCreated?.invoke(createdId)
+            }
+            when (event.optJSONObject("response")?.string("status")) {
+                "queued" -> {
+                    state.phase = "正在排队"
+                    publish(true)
+                }
+                "in_progress" -> {
+                    state.phase = "正在生成回复"
+                    publish(true)
+                }
+            }
+        }
+        "response.queued" -> {
+            state.phase = "正在排队"
+            publish(true)
+        }
+        "response.in_progress" -> {
+            state.phase = state.activeTools.values.lastOrNull() ?: "正在生成回复"
+            publish(true)
+        }
+        "response.output_item.added", "response.output_item.done" -> {
+            val detail = event.optJSONObject("item") ?: return null
+            val index = event.optInt("output_index", 0)
+            val key = state.generation to index
+            val itemType = detail.string("type")
+            val current = item(event)
+            current.id = detail.string("id") ?: current.id
+            current.excluded = itemType != "message" ||
+                detail.string("role") != "assistant" || detail.string("phase") == "commentary"
+            if (itemType == "mcp_call" || itemType == "function_call") {
+                if (type == "response.output_item.added") {
+                    state.activeTools[key] = describeTool(detail.string("name"))
+                } else {
+                    state.activeTools.remove(key)
+                    if (itemType == "mcp_call" && detail.string("status") == "failed") {
+                        detail.string("pipiclaw_failure")?.let { state.failureNotice = it }
+                    }
+                }
+            }
+            if (type == "response.output_item.done") {
+                current.finished = assistantOutput(detail)
+            }
+            state.phase = when {
+                state.activeTools.isNotEmpty() -> state.activeTools.values.last()
+                current.excluded -> "正在处理"
+                else -> "正在生成回复"
+            }
+            publish(true)
+        }
+        "response.output_text.delta", "response.refusal.delta",
+        "response.output_text.done", "response.refusal.done" -> {
+            val current = item(event)
+            if (current.excluded) return null
+            val piece = event.optString("delta", "")
+            val done = event.string("text") ?: event.string("refusal")
+            val partIndex = event.optInt("content_index", 0)
+            if (partIndex !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的内容条目过多。")
+            val part = current.parts.getOrPut(partIndex, ::StringBuilder)
+            if (done != null) {
+                state.received -= part.length
+                part.clear()
+            }
+            val text = done ?: piece
+            val count = minOf(text.length, MAX_OUTPUT - state.received)
+            part.append(text, 0, count)
+            state.received += count
+            state.phase = "正在生成回复"
+            if (count < text.length) throw ApiFailure("回复过长，已保留收到的文字。")
+            publish(false)
+        }
+        "response.completed" -> {
+            val complete = event.optJSONObject("response")?.let { response ->
+                completedOutput(response, onTerminalPartial)
+            }.orEmpty()
+            return complete.ifEmpty(state::collected)
+        }
+        "response.incomplete" -> {
+            val response = event.optJSONObject("response") ?: event
+            if (response.optJSONObject("incomplete_details")?.string("reason") == "steered") {
+                state.generation++
+                state.activeTools.clear()
+                state.phase = "正在根据新要求调整"
+                publish(true)
+                return null
+            }
+            onTerminalPartial(responseOutput(response))
+            throw responseFailure(response)
+        }
+        "response.failed", "response.cancelled", "response.canceled", "error" -> {
+            val response = event.optJSONObject("response") ?: event
+            onTerminalPartial(responseOutput(response))
+            throw responseFailure(response)
+        }
+    }
+    return null
 }
 
 /** One bounded SSE record at a time, including named events and CR/LF framing. */
@@ -431,109 +593,20 @@ internal fun assembleReply(
         onDraft(state.draft())
     }
 
-    fun item(event: JSONObject): DraftItem {
-        val index = event.optInt("output_index", 0)
-        if (index !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的回复条目过多。")
-        return state.output.getOrPut(index, ::DraftItem).apply { id = event.string("item_id") ?: id }
-    }
-
     var terminalPartial = emptyList<Output>()
     state.streamDisrupted = false
     try {
         for ((named, data) in readEvents(reader)) {
             if (data == "[DONE]") return state.collected()
             val event = JSONObject(data)
-            if (event.has("sequence_number") && !event.isNull("sequence_number")) {
-                val seq = event.optInt("sequence_number", -1)
-                if (seq >= 0) state.lastSequence = seq
-            }
-            when (val type = event.string("type") ?: named) {
-                "response.created" -> {
-                    val createdId = event.optJSONObject("response")?.string("id")
-                    if (createdId != null) {
-                        state.responseId = createdId
-                        state.onResponseCreated?.invoke(createdId)
-                    }
-                    when (event.optJSONObject("response")?.string("status")) {
-                        "queued" -> {
-                            state.phase = "正在排队"
-                            publish(true)
-                        }
-                        "in_progress" -> {
-                            state.phase = "正在生成回复"
-                            publish(true)
-                        }
-                    }
-                }
-                "response.queued" -> {
-                    state.phase = "正在排队"
-                    publish(true)
-                }
-                "response.in_progress" -> {
-                    state.phase = state.activeTools.values.lastOrNull() ?: "正在生成回复"
-                    publish(true)
-                }
-                "response.output_item.added", "response.output_item.done" -> {
-                    val detail = event.optJSONObject("item") ?: continue
-                    val index = event.optInt("output_index", 0)
-                    val itemType = detail.string("type")
-                    val current = item(event)
-                    current.id = detail.string("id") ?: current.id
-                    current.excluded = itemType != "message" ||
-                        detail.string("role") != "assistant" || detail.string("phase") == "commentary"
-                    if (itemType == "mcp_call" || itemType == "function_call") {
-                        if (type == "response.output_item.added") {
-                            state.activeTools[index] = describeTool(detail.string("name"))
-                        } else {
-                            state.activeTools.remove(index)
-                            if (itemType == "mcp_call" && detail.string("status") == "failed") {
-                                detail.string("pipiclaw_failure")?.let { state.failureNotice = it }
-                            }
-                        }
-                    }
-                    if (type == "response.output_item.done") {
-                        current.finished = assistantOutput(detail)
-                    }
-                    state.phase = when {
-                        state.activeTools.isNotEmpty() -> state.activeTools.values.last()
-                        current.excluded -> "正在处理"
-                        else -> "正在生成回复"
-                    }
-                    publish(true)
-                }
-                "response.output_text.delta", "response.refusal.delta",
-                "response.output_text.done", "response.refusal.done" -> {
-                    val current = item(event)
-                    if (current.excluded) continue
-                    val piece = event.optString("delta", "")
-                    val done = event.string("text") ?: event.string("refusal")
-                    val partIndex = event.optInt("content_index", 0)
-                    if (partIndex !in 0 until MAX_OUTPUT_ITEMS) throw ApiFailure("服务返回的内容条目过多。")
-                    val part = current.parts.getOrPut(partIndex, ::StringBuilder)
-                    if (done != null) {
-                        state.received -= part.length
-                        part.clear()
-                    }
-                    val text = done ?: piece
-                    val count = minOf(text.length, MAX_OUTPUT - state.received)
-                    part.append(text, 0, count)
-                    state.received += count
-                    state.phase = "正在生成回复"
-                    if (count < text.length) throw ApiFailure("回复过长，已保留收到的文字。")
-                    publish()
-                }
-                "response.completed" -> {
-                    val complete = event.optJSONObject("response")?.let { response ->
-                        completedOutput(response) { terminalPartial = it }
-                    }.orEmpty()
-                    return complete.ifEmpty(state::collected)
-                }
-                "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "error" -> {
-                    val response = event.optJSONObject("response") ?: event
-                    terminalPartial = responseOutput(response)
-                    throw responseFailure(response)
-                }
-            }
+            val completed = applyStreamEvent(
+                type = event.string("type") ?: named,
+                event = event,
+                state = state,
+                publish = ::publish,
+                onTerminalPartial = { terminalPartial = it }
+            )
+            if (completed != null) return completed
         }
         state.streamDisrupted = true
         throw ApiFailure("回复流提前断开，已保留收到的文字。")

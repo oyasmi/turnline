@@ -30,6 +30,7 @@ data class TurnlineState(
     val messages: List<Message> = emptyList(),
     val draft: ResponseDraft? = null,
     val activeTurn: String? = null,
+    val canSteer: Boolean = false,
     val reachable: Boolean = false,
     val call: CallStage = CallStage.OFF,
     val callStartedAt: Long? = null,
@@ -47,6 +48,7 @@ data class TurnlineState(
 }
 
 class TurnlineViewModel(application: Application) : AndroidViewModel(application) {
+    private val appContext = application.applicationContext
     private val store = TurnlineStore(application)
     private val api = ResponsesClient()
     private val speech = DeviceSpeech(application)
@@ -57,14 +59,28 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     private var pollJob: Job? = null
     private var listenJob: Job? = null
     private var foreground = false
+    private var callServiceActive = false
     private var callId = 0L
     private var silenceCount = 0
     private var activeResponseId: String? = null
+    private var activeTurnUsesWs = false
+    private var pendingSteerFallback: String? = null
     private var pendingInterruption: String = ""
     private var activeSpokenPhrase: String? = null
     private var lastCompletedPhrase: String? = null
 
+    private val canRunCallAudio: Boolean
+        get() = foreground || (current.inCall && callServiceActive)
+
     init {
+        viewModelScope.launch {
+            CallControlBus.actions.collect { action ->
+                when (action) {
+                    CallControlAction.TOGGLE -> callAction()
+                    CallControlAction.HANGUP -> endCall()
+                }
+            }
+        }
         viewModelScope.launch {
             try {
                 val initial = withContext(Dispatchers.IO) {
@@ -105,6 +121,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     stopAudio()
                     pollJob?.cancelAndJoin()
                     turnJob?.cancelAndJoin()
+                    api.closeWebSocket()
                     pendingInterruption = ""
                 }
                 val next = withContext(Dispatchers.IO) {
@@ -131,7 +148,13 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     fun setForeground(active: Boolean) {
         foreground = active
-        if (!active) stopAudio()
+        if (!active) {
+            if (current.inCall && callServiceActive) {
+                syncCallNotification()
+            } else {
+                stopAudio()
+            }
+        }
         refreshPolling()
     }
 
@@ -149,6 +172,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             try {
                 pollJob?.cancelAndJoin()
                 turnJob?.cancelAndJoin()
+                api.closeWebSocket()
                 val (selected, messages, history) = withContext(Dispatchers.IO) {
                     val recent = store.conversations(scope)
                     val refreshed = recent.find { it.id == conversation.id } ?: conversation
@@ -202,11 +226,34 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     fun retryLastTurn(): Boolean = send("请重新回答上一条问题。", voice = current.inCall)
 
+    private fun canSteerNow(text: String): Boolean =
+        current.busy && activeTurnUsesWs && activeResponseId != null && current.reading == null &&
+            !text.startsWith("/")
+
     fun send(value: String, voice: Boolean = false): Boolean {
         val settings = current.settings ?: return false
         val scope = current.serviceScope ?: return false
         val text = value.trim()
-        if (current.busy || current.loading || text.isBlank() || text.length > MAX_INPUT) return false
+        if (current.loading || text.isBlank() || text.length > MAX_INPUT) return false
+
+        // Mid-turn steering over PipiClaw WebSocket: guide the running turn without cancelling progress.
+        if (canSteerNow(text) && api.steerActiveResponse(text, activeResponseId)) {
+            val steerMsg = Message(
+                role = Role.USER,
+                text = text,
+                delivery = Delivery.COMPLETE,
+                timestamp = System.currentTimeMillis()
+            )
+            pendingSteerFallback = text
+            val thread = current.conversation
+            update { it.copy(messages = (it.messages + steerMsg).takeLast(TRANSCRIPT_LIMIT), notice = null) }
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { store.startTurn(scope, thread, steerMsg, steerMsg.timestamp) }
+            }
+            return true
+        }
+
+        if (current.busy) return false
         listenJob?.cancel()
         speech.cancelRecognition()
         stopReading()
@@ -220,12 +267,15 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         val useLiveReading = voiceSession != null && settings.readingMode == ReadingMode.LIVE
         val interruptionContext = if (voice) pendingInterruption else ""
         pendingInterruption = ""
+        pendingSteerFallback = null
         activeSpokenPhrase = null
         lastCompletedPhrase = null
         activeResponseId = null
+        activeTurnUsesWs = false
         val latest = AtomicReference(ResponseDraft())
         update {
-            it.copy(conversation = thread, messages = messages, activeTurn = user.id, draft = ResponseDraft(),
+            it.copy(conversation = thread, messages = messages, activeTurn = user.id, canSteer = false,
+                draft = ResponseDraft(),
                 call = if (it.inCall) CallStage.WAITING else CallStage.OFF,
                 partialSpeech = "", level = 0f, notice = null, recoverText = null)
         }
@@ -235,6 +285,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             var answers = emptyList<Message>()
             var result = Delivery.FAILED
             var issue: String? = null
+            var steerFailedText: String? = null
             var liveStreamId: Long? = null
             var livePending = ""
             var liveConsumed = 0
@@ -243,7 +294,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             var livePlaybackDone = false
 
             fun startLiveStreamIfNeeded(): Long? {
-                if (!useLiveReading || voiceSession != callId || !current.inCall || !foreground) return null
+                if (!useLiveReading || voiceSession != callId || !current.inCall || !canRunCallAudio) return null
                 liveStreamId?.let { return it }
                 val session = voiceSession
                 val streamId = speech.beginSpeechStream(
@@ -256,7 +307,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     finished = { error ->
                         livePlaybackDone = true
                         livePlaybackError = error
-                        val shouldListen = callId == session && current.inCall && !current.busy && foreground && !current.loading
+                        val shouldListen = callId == session && current.inCall && !current.busy && canRunCallAudio && !current.loading
                         update {
                             it.copy(
                                 reading = null,
@@ -274,7 +325,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                 )
                 if (streamId != null) {
                     liveStreamId = streamId
-                    update { it.copy(reading = CALL_PLAYBACK, call = CallStage.SPEAKING, level = 0f) }
+                    update { it.copy(reading = CALL_PLAYBACK, canSteer = false, call = CallStage.SPEAKING, level = 0f) }
                 }
                 return streamId
             }
@@ -343,7 +394,21 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                     voice = voice,
                     instructions = voiceInstructions,
                     background = remoteId != null,
-                    onResponseCreated = { createdResponseId -> activeResponseId = createdResponseId }
+                    preferWebSocket = remoteId != null,
+                    onResponseCreated = { createdResponseId, viaWs ->
+                        activeResponseId = createdResponseId
+                        activeTurnUsesWs = viaWs
+                        pendingSteerFallback = null
+                        viewModelScope.launch {
+                            if (current.activeTurn == user.id) {
+                                update { it.copy(canSteer = viaWs && it.reading == null) }
+                            }
+                        }
+                    },
+                    onSteerFailed = {
+                        steerFailedText = pendingSteerFallback
+                        pendingSteerFallback = null
+                    }
                 ) { draft ->
                     latest.set(draft)
                     viewModelScope.launch {
@@ -384,6 +449,8 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                 // Finish the local turn, including the UI update, even when the HTTP call was cancelled.
                 withContext(NonCancellable) {
                     activeResponseId = null
+                    activeTurnUsesWs = false
+                    pendingSteerFallback = null
                     val complete = result == Delivery.COMPLETE
                     if (!complete) {
                         if (liveStreamId != null) stopReading()
@@ -418,12 +485,16 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                         update {
                             val conversation = if (stored) it.conversation else it.conversation.copy(title = existing.title)
                             it.copy(conversation = conversation,
-                                messages = transcript, history = history, activeTurn = null, draft = null,
+                                messages = transcript, history = history, activeTurn = null, canSteer = false,
+                                draft = null,
                                 reachable = complete || (issue == null && it.reachable),
                                 notice = saveIssue ?: issue ?: livePlaybackError ?: it.notice,
                                 recoverText = text.takeIf { result == Delivery.FAILED })
                         }
-                        if (current.inCall && foreground && !current.loading) {
+                        if (steerFailedText != null && result != Delivery.STOPPED) {
+                            val fallback = steerFailedText!!
+                            viewModelScope.launch { send(fallback, voice = voice) }
+                        } else if (current.inCall && canRunCallAudio && !current.loading) {
                             when {
                                 complete && voiceSession == callId && useLiveReading -> {
                                     feedLiveSpeech(combinedText, flush = true)
@@ -456,8 +527,12 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
     fun stopResponse() {
         val settings = current.settings
         val responseId = activeResponseId
-        if (settings?.usesConversation == true && responseId != null) {
-            activeResponseId = null
+        val viaWs = activeTurnUsesWs
+        activeResponseId = null
+        activeTurnUsesWs = false
+        if (viaWs) {
+            api.cancelActiveWebSocketResponse(responseId)
+        } else if (settings?.usesConversation == true && responseId != null) {
             viewModelScope.launch {
                 runCatching { api.cancelResponse(settings, responseId) }
             }
@@ -471,6 +546,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         callId++
         silenceCount = 0
         pendingInterruption = ""
+        callServiceActive = CallForegroundService.startOrUpdate(appContext, "准备接听", "暂停")
         update {
             it.copy(
                 call = CallStage.WAITING,
@@ -490,6 +566,10 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         pendingInterruption = ""
         activeSpokenPhrase = null
         lastCompletedPhrase = null
+        if (callServiceActive) {
+            callServiceActive = false
+            CallForegroundService.stop(appContext)
+        }
         update { it.copy(call = CallStage.OFF, callStartedAt = null, partialSpeech = "", level = 0f) }
     }
 
@@ -523,6 +603,19 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun syncCallNotification() {
+        if (!callServiceActive || !current.inCall) return
+        val (status, actionLabel) = when (current.call) {
+            CallStage.LISTENING -> "正在听…" to "暂停"
+            CallStage.TRANSCRIBING -> "正在转写…" to "暂停"
+            CallStage.WAITING -> (current.draft?.phase ?: "等待回复") to if (current.busy) "打断" else "暂停"
+            CallStage.SPEAKING -> "正在播报" to "打断"
+            CallStage.PAUSED -> "听筒已暂停" to "继续听"
+            CallStage.OFF -> return
+        }
+        CallForegroundService.startOrUpdate(appContext, status, actionLabel)
+    }
+
     private fun recordInterruptionPoint() {
         val fragment = activeSpokenPhrase?.trim().orEmpty()
         val last = lastCompletedPhrase?.trim().orEmpty()
@@ -537,12 +630,12 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     private fun scheduleListening(ms: Long) {
         val settings = current.settings ?: return
-        if (!foreground || !current.inCall || current.busy || current.loading) return
+        if (!canRunCallAudio || !current.inCall || current.busy || current.loading) return
         listenJob?.cancel()
         val session = callId
         listenJob = viewModelScope.launch {
             delay(ms)
-            if (callId != session || !current.inCall || current.busy || !foreground) return@launch
+            if (callId != session || !current.inCall || current.busy || !canRunCallAudio) return@launch
             update { it.copy(call = CallStage.LISTENING, level = 0f, partialSpeech = "") }
             speech.listen(settings,
                 onText = { text -> update { it.copy(partialSpeech = text) } },
@@ -595,7 +688,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         activeSpokenPhrase = null
         lastCompletedPhrase = null
         fun finished(error: String?) {
-            val shouldListen = call && callId == session && current.inCall
+            val shouldListen = call && callId == session && current.inCall && canRunCallAudio
             update {
                 it.copy(reading = null, notice = error ?: it.notice,
                     call = if (!shouldListen) it.call else if (error == null) CallStage.WAITING else CallStage.PAUSED)
@@ -608,7 +701,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
             finished(if (call) null else "这条消息没有可朗读的文字。")
             return
         }
-        update { it.copy(reading = id, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
+        update { it.copy(reading = id, canSteer = false, call = if (call) CallStage.SPEAKING else CallStage.OFF, level = 0f) }
         speech.speak(
             text = spoken,
             settings = settings,
@@ -632,7 +725,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
         val thread = current.conversation
         val remoteId = thread.remoteId
         val previous = pollJob
-        if (!foreground || settings?.usesConversation != true || scope == null || remoteId == null ||
+        if (!canRunCallAudio || settings?.usesConversation != true || scope == null || remoteId == null ||
             current.loading || current.busy
         ) {
             previous?.cancel()
@@ -664,7 +757,7 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
                                 state.copy(conversation = state.conversation.copy(cursor = cursor), messages = transcript,
                                     history = history, reachable = true)
                             }
-                            if (arrived.isNotEmpty() && current.inCall && foreground && !current.busy &&
+                            if (arrived.isNotEmpty() && current.inCall && canRunCallAudio && !current.busy &&
                                 current.reading == null && current.call != CallStage.TRANSCRIBING
                             ) {
                                 val summary = updateSpeech(arrived.last().text)
@@ -691,11 +784,25 @@ class TurnlineViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         foreground = false
+        if (callServiceActive) {
+            callServiceActive = false
+            CallForegroundService.stop(appContext)
+        }
+        api.closeWebSocket()
         speech.close()
         super.onCleared()
     }
 
-    private fun update(change: (TurnlineState) -> TurnlineState) = mutable.update(change)
+    private fun update(change: (TurnlineState) -> TurnlineState) {
+        val previousStage = current.call
+        val previousPhase = current.draft?.phase
+        mutable.update(change)
+        if (callServiceActive && current.inCall &&
+            (current.call != previousStage || current.draft?.phase != previousPhase)
+        ) {
+            syncCallNotification()
+        }
+    }
 
     private companion object {
         const val CALL_PLAYBACK = "call"
