@@ -2,7 +2,15 @@
 __pycache__/
 *.py[cod]
 /.cache/
+/.pytest_cache/
 /artifacts/
+/playwright-report/
+/test-results/
+
+# Local dependencies and downloaded speech models
+/.venv/
+/node_modules/
+/models/
 
 # Local settings and credentials
 .env

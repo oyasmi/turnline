@@ -1,0 +1,58 @@
+# 换下吞词 Matcha，改用 MeloTTS
+
+> 这是早期针对词表丢词问题的选型记录。当前 Web 继续使用 Matcha，由 Turnline 自己生成中文和英文音素。现行链路见 [项目架构](../architecture.md)。
+
+相关材料包括 [候选模型 CPU 对比](notes/small_cpu_tts.md)、[sherpa-onnx 合成](notes/sherpa_onnx_tts.md)、[中英混读](notes/codeswitch_zh_en.md)、[大模型部署条件](notes/heavy_models_fit.md)和 [Matcha、MeloTTS 试听样本](tts-samples/)。
+
+Turnline 的本地播报应改用官方 MeloTTS 的中文说话人，走它自己的 CPU 推理，`language='ZH'`（内部是 `ZH_MIX_EN`），不再使用 sherpa-onnx 2.0.3 的 `matcha-icefall-zh-en`，也不要换成 sherpa 里的 Kokoro 或 Melo ONNX。现用中文还能听，是因为中文仍走拼音词表；Kubernetes 这类英文被整词跳过，是 2.0.0 去掉库内 espeak 之后的既定行为，2.0.3 没有改。官方 Melo 是这次仍留在小模型档、许可证为 MIT、并且源码对未知英文做神经注音而不是把词删掉的唯一实现（[MeloTTS](https://github.com/myshell-ai/MeloTTS/)，[中英前端](https://github.com/myshell-ai/MeloTTS/blob/main/melo/text/chinese_mix.py)）。它没有「请记住，版本是 2.5，名字叫 Kubernetes」的公开听测，也没有参数量、PyTorch 权重字节和 i5-8260U 的 RTF，所以这次替换只确立一件事：专名会留在音素序列里，读音可以怪，不能承诺像母语者，也不能把 README 里的 “CPU real-time” 当成这台机器已经快于实时。Kokoro-82M v1.1-zh 更小、中文说话人更多，但默认中文管线不读英文，放进 sherpa 2.x 会继续吞词，树莓派 4 上的 fp32 近亲在 2 线程的 RTF 是 **4.470**（[RTF 表](https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/rtf.html)）。
+
+## Pipecat 的云端名单不进入这台离线机器
+
+Pipecat 的 TTS 目录很长，主体是托管接口：Cartesia、ElevenLabs、Azure、Deepgram、Google、OpenAI、MiniMax、Fish、Rime 以及同表里的其他云厂商（[Supported Services](https://docs.pipecat.ai/server/services/supported-services)）。当时 Turnline 的 Web 语音在本机与 SenseVoice 共用一颗无独显的 Intel Core i5-8260U，回复不走网络。edge-tts 和 Azure 没有可部署的开源权重，按这个约束直接排除。同一张表里的 Kokoro、Piper、Pocket TTS、Supertonic 和已弃用的 XTTS 是本地引擎，下面按开源、下载体积、与识别共享 CPU、普通话和中英混读重新裁定，不因为它们出现在 Pipecat 里就入选。
+
+## sherpa 2.0.3 仍会整词丢掉未知英文
+
+丢词发生在查表，不发生在「zh-en」这个名字上。sherpa-onnx **2.0.0（2026-10-23）** 删除了内置 espeak-ng 和 piper-phonemize，理由是 espeak-ng 的 GPL 与 sherpa 的 Apache-2.0 冲突；`data_dir` 从那时起被忽略（[v2.0.0](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.0)，[迁移说明](https://k2-fsa.github.io/sherpa/onnx/faqs/update-v1.x-to-v2.x-espeak-ng.html)）。维护者在 2026-10-30 写明 **“We ignore OOVs”**，拒绝在库内加 G2P，只接受往 `lexicon.txt` 补词，或由调用方事先变成 token（[issue 4139](https://github.com/k2-fsa/sherpa-onnx/issues/4139)）。2.0.1 到 **2.0.3（2026-11-22）** 的变更列表里没有「未知英文改为拼读或音素化」。2.0.3 就是检索当天的最新版本。
+
+现用包是官方仍在发的那一包：`model-steps-3.onnx` **72 MB**、16 kHz、1 个说话人，加 `vocos-16khz-univ.onnx` **51.4 MB**（[样本页](https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese-English/matcha-icefall-zh-en.html)）。它的 `lexicon.txt` 只有约 1.3 MB，与纯中文 Baker 同级；1.12.x 的英语靠 `--matcha-data-dir` 调 espeak，2.0.3 不读包里的 `espeak-ng-data`。拉丁词查不到就记 `OOV word skipped`，音素不在 `tokens.txt` 里就 `Skip unknown token`（[offline-tts-matcha-impl.h](https://github.com/k2-fsa/sherpa-onnx/blob/9a2737b3/sherpa-onnx/csrc/offline-tts-matcha-impl.h)）。`Kubernetes` 没有连字符，2.0.0 的边界修复不会把它拆成字母（[PR 4075](https://github.com/k2-fsa/sherpa-onnx/pull/4075)）。维护者在模型刚接上时已转述作者说明：**英文效果不好**；那是音质上限，不是 2.0.3 的一个小故障（[issue 2762](https://github.com/k2-fsa/sherpa-onnx/issues/2762)）。这份 zh-en 的许可证没有从 ModelScope 模型卡核实，不能写成 Apache。
+
+因此在 sherpa 2.x 里换一个中英检查点，解决不了吞词。Kokoro 的英语词典是 Misaki 的常用词闭集，2.0.1 上 `The budget is 1969 dollars` 被读成 “The budget is dollars”，自造词整词消失；2026-11-20 的 master 仍会丢掉 her、or、technician（[issue 4247](https://github.com/k2-fsa/sherpa-onnx/issues/4247)）。sherpa 导出的 Melo 把 CMU 词典写进 `lexicon.txt`，文档写明只有词表里的英文会被念出，新词要手工加（[VITS 文档](https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/vits.html)）。官方 Python 和这份 ONNX 不是同一个前端。
+
+## 小体积候选里只有官方 Melo 不删词
+
+过了「开源、约几百 MB 以内、普通话是一等语言」这三道门的本地实现，差在最后一列。没有一行在 i5-8260U 上测过，也没有一行发表过目标句的听测。Kokoro 的许可证记载互相矛盾：sherpa 的模型卡摘录写有 “This Apache licensed model”，另一份对同一页的摘录没有这句，只在 v1.0 卡和第三方表里看到 Apache-2.0；中文数据由 LongMaoData 授权，不是一份具名的开源许可证（[v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)，[MiniSpeech](https://minispeech.com/licenses/)）。
+
+| 实现 | 体积 | 许可证 | CPU 证据 | 中英混读 |
+| --- | --- | --- | --- | --- |
+| 现用 sherpa Matcha zh-en + Vocos-16k | 声学 72 MB，声码器 51.4 MB，16 kHz，1 个说话人 | 模型卡正文未取到 | 不在官方 RTF 表。同尺寸 Baker 在树莓派 4 上 2 线程 RTF **0.536**。12 核 Cortex-A78AE、4 线程的用户自测 RTF **0.103** | 2.0.3 忽略 espeak。未命中即整词跳过。维护者称英文效果不好。无目标句听测 |
+| 官方 MeloTTS，`language='ZH'` | 参数量与 PyTorch 字节数未公布。依赖多语 BERT，内存高于 82M 的 Kokoro。sherpa 的 163 MB ONNX 是另一条前端 | **MIT** | README 写 CPU 实时，没有 RTF。一篇博客在未具名 CPU 上热身约 RTF **0.57**，与同文表格里的 0.05、MOS 4.2 矛盾；0.05、4.2 和 i5-12500H 的 INT8 不采用 | 官方示例就是句中英文，且 `device='cpu'`。词表外走神经 G2P，非法音素换成 `UNK`，不删词。`2.5` 会被读成中文。无目标句听测 |
+| Kokoro-82M v1.1-zh，官方管线且自行传入英文 G2P | **82M**，24 kHz。fp16 ONNX **164 MB**，int8 **114 MB**，声音文件另 **53 MB**。int8 对 fp32 的谱相关 **0.874** | 见上，Apache 记载不一致 | 树莓派 4 上 v1.0 fp32、2 线程 RTF **4.470**。表把这行标成 v1.1，测量文件是 v1.0 的 310 MB。无 int8、无 x86。未具名 CPU 的 RTF 0.61 与「约 400 字用 110 秒」对不上 | 默认 `en_callable` 为空，v1.1 **不读句中英文**。传入 espeak 回退后，用户仍称混读没法用。无目标句听测 |
+| sherpa 2.x 的 Kokoro v1.1 int8 | 压缩包 **140.2 MB**（fp32 348.0 MB），103 个说话人，24 kHz | 同上 | 无 int8 官方 RTF；上一行的 4.470 不能套过来 | 与 Matcha 相同：`OOV word skipped`。hello 可以在词表里，Kubernetes 不能假设在 |
+| PaddleSpeech FastSpeech2-CNNDecoder 流式 ONNX | 声学包：普通话 **84 MB**，ZH_EN **145 MB**。声码器字节未公布 | LICENSE 原文未打开 | **i5-8250U**、4 线程：HTTP RTF **0.623**、首包 **0.311 秒**；WebSocket RTF **0.588**、首包 **0.278 秒**。语料是普通话，不是混读模型 | 有一份 ZH_EN 声学模型。没有混读例句，也没有「未知英文不删除」的源码证据 |
+| tiny-voca-zh | **4.56M** 参数，**18 MB**，24 kHz，两个固定声 | Apache-2.0 | 作者：未具名 CPU 上 0.44 秒合成 5.9 秒。树莓派 4 上 ONNX fp32 用 0.52 秒合成 5.4 秒，RTF 约 **0.1** | 作者写明只做普通话。仓库创建于 2026-11-21，语料是合成语音 |
+| Piper zh_CN medium | chaowen / xiao_ya 约 58 MB，int8 压缩包 **13.4 MB**；huayan ONNX **63.2 MB**。22.05 kHz | 三个官方声都被 2026-10 的可商用审计排除。huayan 仍是 Lessac，许可证 Unknown；xiao_ya 为 DataBaker 非商用；chaowen 的底模录音许可未核清 | 没有中文 RTF。同体积英文模型在树莓派 4 上 4 线程 RTF 约 0.35，不能当作中文成绩 | 模型卡没有句中英文。放进 sherpa 2.x 后，未命中词表同样跳过 |
+| MOSS-TTS-Nano | 第三方：fp32 LM 目录 **640 MB**；int8 约 **198 MB**，codec 仍约 **42 MB**。一则 C 端口工作集约 **900 MB** | 徽章为 Apache-2.0，README 仍写尚未许可再分发 | 官方无 RTF。未具名 x86、4 线程 int8 RTF 0.25。更新的 i5-1240P 上 RTF **0.48–0.66**，到第一声约 **1.1 秒** | 语言表含中文和英文。句内专名是否出声没有写，也没有听测 |
+
+官方 Melo 的中文路径用正则抽出拉丁词，中文走拼音，英文先查 CMU 词典，查不到就调用 `g2p_en` 的神经网络预测读音，预测结果若不在音素表里则换成 `UNK`，词本身留在序列里（[chinese_mix.py](https://github.com/myshell-ai/MeloTTS/blob/main/melo/text/chinese_mix.py)，[g2p](https://github.com/Kyubyong/g2p/)）。官方示例就是「我最近在学习machine learning……」，并且指定 `device='cpu'`（[install.md](https://github.com/myshell-ai/MeloTTS/blob/main/docs/install.md)）。数字会先被转成中文，所以 `2.5` 不会按英语 “two point five” 读。一项普通话实验把 MeloTTS-Chinese 的 MOS 记为 **3.04**，同表 fish-speech 为 3.57；这不是和 Matcha 的同场比较，只能说明它不是一份已证明的音质升级（[VoicePing](https://voiceping.net/en/blog/research-bert-vits2-tts/)）。
+
+Kokoro 更小，而且中文是一轮超过 100 小时、100 个职业说话人的正式训练，不是音素把戏（[v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)）。它落选是因为前端和行为证据：`lang_code='z'` 时 `en_callable` 默认为空，英文 G2P 不会自动建起来（[pipeline.py](https://github.com/hexgrad/kokoro/blob/main/kokoro/pipeline.py)）。作者在 issue 里面对的原话是 v1.1 **根本不读句中英语**；用户自己传入 espeak 回退之后，仍说混读没法用，多音字也不好，测试句只是 “are you ok”，不是专名（[issue 238](https://github.com/hexgrad/kokoro/issues/238)）。Misaki 能把造词 `outofdictionary` 变成音素，只证明英文 G2P 会吐符号，不证明中文声线把 Kubernetes 读对（[misaki](https://github.com/hexgrad/misaki)）。官方中文示例还要对付大约 100 个 token 之后的赶读（[make_zh.py](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/blob/main/samples/make_zh.py)）。int8 相对 fp32 的谱相关 **0.874**，差于英语 int8 的 0.916，没有听测表（[kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx/releases)）。两条 CPU 时间笔记都没写 CPU 型号，而且互相矛盾：一处 RTF 0.61，另一处约 400 个中英字符用了约 110 秒（[CSDN](https://adg.csdn.net/694d02505b9f5f31781acab8.html)，[jiangsanyin](https://jiangsanyin.github.io/2025/09/08/tts%E7%9B%B8%E5%85%B3%E6%A8%A1%E5%9E%8B%E4%B8%8E%E5%BC%80%E6%BA%90library%E6%B5%8B%E8%AF%84/)）。这条更小的模型留在「体积」列，不留在「不吞词且听得下去」列。
+
+## 同级 CPU 的实时数字属于另一条普通话管线
+
+i5-8260U 是 15 W、4 核的旧超低压处理器，还要和浏览器、SenseVoice 分时间。公开材料里，和它同一档的测量只有 PaddleSpeech：在 **i5-8250U**、4 线程、流式 ONNX 上，约 3.8 秒的普通话首包 **0.28–0.31 秒**，RTF **0.59–0.62**，没有迟到包（[TTS-Benchmark](https://github.com/PaddlePaddle/PaddleSpeech/wiki/TTS-Benchmark)）。计时的是 Baker/CSMSC，不是那份 **145 MB** 的 ZH_EN 声学模型（[released models](https://github.com/PaddlePaddle/PaddleSpeech/blob/HEAD/docs/source/released_model.md)）。离线的 FastSpeech2 加 HiFi-GAN 在 24 核至强上 RTF **1.71**，不能当实时方案。许可证文件和声码器体积这次都没有打开。它是这台机器等级上唯一算数的速度锚，它回答不了 Kubernetes 会不会被念出来。
+
+其余速度数字都不能搬到这颗 CPU 上。Matcha zh-en 自己不在 sherpa 的 RTF 表里；Baker 在树莓派 4 上 2 线程 RTF 0.536，说明 72 MB 这一档在弱板上仍能实时，A78AE 上的 0.103 只说明更强的 ARM 很富余。Kokoro 的 4.470 是树莓派 4、v1.0、fp32，把表上的行名当成 v1.1 int8 没有依据；i5-8260U 比树莓派 4 快，快多少没有公布，不能从 4.5 推出「一定不实时」，也不能推出「和 Matcha 一样便宜」。sherpa 版 Melo 在同一张表上 4 线程 RTF **2.518**、1 线程 **6.727**，44.1 kHz，这是离线整句，而且前端是词表（[VITS 文档](https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/vits.html)）。博客里的热身 RTF 0.57 来自未具名 CPU，其中 BERT 约 380 毫秒、HiFi-GAN 约 470 毫秒，和该文自己的 0.05 冲突，只能当作「官方路径并不免费」的旁证（[MeloTTS 笔记](https://xuqi2024.github.io/2026/10/17/2026-10-17-audio-15-melotts/)）。tiny-voca-zh 是这组里最快的，树莓派 4 上 RTF 约 0.1，作者同时写明只做普通话、没有真人录音、音质上限就是教师模型（[tiny-voca-zh](https://github.com/xiaoliukuailiu/tiny-voca-zh)，[loom.cpp](https://github.com/loom-ai-org/loom.cpp)）。Piper 中文文件最小，三个官方声线都在许可上站不住：huayan 的现行卡片仍是 Lessac 且 “License: Unknown”，xiao_ya 是 DataBaker 非商用，chaowen 的数据写 CC0，底模 hifi_tts_92 的录音许可没有打开（[Loudness.ai](https://loudness.ai/research/piper-tts-voices-ranked/)，[huayan](https://huggingface.co/rhasspy/piper-voices/raw/main/zh/zh_CN/huayan/medium/MODEL_CARD)，[chaowen](https://huggingface.co/datasets/rhasspy/piper-checkpoints/blob/main/zh/zh_CN/chaowen/medium/MODEL_CARD)）。该研究自己的商用评分表仍给 Huayan 打了 79.6，和排除表冲突，不采用这个分数。
+
+MOSS-TTS-Nano 是 2026 年形态正确的小多语模型：约 0.1B、声称含中文和英文、可流式、有 ONNX CPU 路径。它出不了默认名单。fp32 语言模型目录被写成 **640 MB**，一则面向更新的 i5-1240P 的端口工作集约 **900 MB**、RTF 0.48–0.66、第一声约 1.1 秒（[REALBITS](https://huggingface.co/REALBITS/MOSS-TTS-Nano-100M-ONNX-int8)，[moss-tts-nano-c](https://github.com/li-ming1/moss-tts-nano-c)）。第三方 int8 的 0.25 没有 CPU 型号。README 末尾仍要求在许可证文件公布前不要当作可再分发（[MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano)）。句内中英切换没有被写明。除了这则 900 MB，短名单里没有别的 RSS；和 SenseVoice 挤在数 GB 内存里时，这个空缺本身就是 Melo 上线前必须补的测量，不是可以忽略的脚注。
+
+KittenTTS 的小模型、NeuTTS、已归档的 Supertonic、官方 Pocket TTS 和 StyleTTS2-lite 的语言表里没有普通话。带中文的 Kitten 是约 1.7B 的三值模型，没有中文 CPU RTF。社区的 Pocket 中文只有一个指针，没有体积、许可证和 RTF。espeak-ng 是音素器，不是这条播报链路的声线。
+
+## 半个十亿参数以上的中文系统进不了共享内存
+
+2025–2026 年音质更好的中文开源系统，在这台机器上一个都不留下。Fun-CosyVoice3-0.5B 只保留一份 LLM、flow、HiFT、tokenizer 和 campplus，文件合计 **4.43 GB**；在更新的 Core Ultra 5 322 上，约 8 秒中文用了 34 秒，RTF **4.6**（[模型卡](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512)，[Terry L](https://terryl.in/en/blog/cosyvoice-3-voice-cloning)）。Qwen3-TTS 12Hz 0.6B 是其中唯一同时官方、Apache-2.0、整仓 **2.49 GB**、中文 WER 仍有竞争力的检查点，Seed 中文 WER **0.92**，但 RTF **0.288**、首包 97 毫秒来自 vLLM 加 CUDA Graph，没有 CPU 数字（[仓库](https://github.com/QwenLM/Qwen3-TTS/)，[技术报告](https://arxiv.org/pdf/2601.15621)）。F5-TTS 的前端最干净：英文保持字母，中文转成完整拼音，Base 为 **335.8M** 参数；速度是 RTX 3090 上 RTF 0.15，Apple M2 上权重 953 MB、RSS 1.1 GB、RTF **2.69**，许可证在该基准里记为 CC-BY-NC，本次没有打开仓库 LICENSE 原文（[论文](https://arxiv.org/abs/2410.06885)，[OrcaBot](https://orcabot.com/benchmarks/open-weight-tts)）。IndexTTS2 的 `gpt.pth` 为 **3.48 GB**，CPU 路径只有「请耐心」；社区在 RTX 3060 默认设置下约 RTF **13.1**（[index-tts](https://github.com/index-tts/index-tts/)，[安装文](https://localaimaster.com/blog/indextts-2-setup-guide)）。Fish S2-Pro 的官方推理内存是 **24 GB** GPU（[安装文档](https://speech.fish.audio/install/)）。XTTS 在 M2 上 RSS **4.0 GB**、RTF 1.69，许可证为 CPML（[OrcaBot](https://orcabot.com/benchmarks/open-weight-tts)）。这些系统的中英声明，包括字符或 BPE 前端，说明它们不像词表那样整词删除；已发表的错误率都来自单语测试集，不能写成已经听过 Kubernetes。
+
+## Conclusion
+
+这次要换的是文本前端的契约，不是一个更大的 sherpa 声线。sherpa-onnx 2.x 为了甩掉 GPL，把未知英文定义成可以忽略的词；官方 Melo 把未知英文定义成必须预测读音的字母串。Turnline 要的是第二种契约，所以替换目标在 sherpa 之外。2026 年那些会保留英文字母的大系统，文件和 CPU 倍数都已经超出和 SenseVoice 共享的范围，音质台阶暂时买不到。
+
+若官方 Melo 日后在这台 i5-8260U 上、与 SenseVoice 同时运行时热身 RTF 不能稳定低于 1，公开材料里没有下一家可以自动接上。Kokoro 的体积优势已经被树莓派上的 4.47 和用户对混读的负面报告抵消；PaddleSpeech 有同级 CPU 的实时数字，计时的却是普通话。那时站得住的决定是继续用现有 Matcha 播中文，并接受专名缺失，而不是再换一个仍会吞词的 sherpa 包。Qwen3-TTS 12Hz 0.6B 是以后唯一值得重测的官方中文权重，前提是这台 CPU 上出现 RTF，而不是再读一遍 GPU 论文。
