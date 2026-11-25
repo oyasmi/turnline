@@ -45,15 +45,33 @@ ssh -N -L 8686:127.0.0.1:8686 user@turnline-host
 
 ### 方案三：Turnline 直接提供 HTTPS（推荐单进程内网 / 公网部署）
 
-Turnline 可直接提供 HTTPS 与内置口令访问控制，无需额外部署 Caddy 或 Nginx。
+Turnline 可直接提供 HTTPS 与内置口令访问控制，无需额外部署 Caddy 或 Nginx。仓库根目录的 `Makefile` 已封装好常用部署命令（运行 `make` 查看完整参数）：
 
-1. **先设置访问口令**（口令以 `scrypt` 加盐哈希保存在状态目录的 `auth.json`，权限 `0600`）：
+1. **内网 / 局域网部署**（自动检测本机局域网 IP，签发本地自签证书并开启口令保护，状态目录默认 `~/.local/state/turnline-lan`）：
 
 ```bash
-uv run python server.py auth set-passcode
+# 首次设置内网实例口令
+make auth-set STATE_DIR=~/.local/state/turnline-lan
+
+# 前台启动（也可显式指定 LAN_HOST=192.168.1.5 或 AUTH=none）
+make run-lan
 ```
 
-2. **公网部署**（使用受信任的 PEM 证书链与私钥，如 Let's Encrypt，自动开启 HSTS）：
+启动后，程序会打印本地 CA 证书路径。将该 CA 证书导入手机或电脑的系统信任库后，即可正常打开该 HTTPS 地址并使用麦克风。后续重启会自动复用状态目录中的 CA 与有效证书。
+
+2. **公网部署**（使用受信任的 PEM 证书链与私钥，如 Let's Encrypt，自动开启 HSTS，状态目录默认 `~/.local/state/turnline-public`，默认会话有效期 14 天）：
+
+```bash
+# 首次设置公网实例口令
+make auth-set STATE_DIR=~/.local/state/turnline-public
+
+# 前台启动
+make run-public \
+  TLS_CERT=/etc/letsencrypt/live/your.domain/fullchain.pem \
+  TLS_KEY=/etc/letsencrypt/live/your.domain/privkey.pem
+```
+
+等价的底层启动命令如下：
 
 ```bash
 uv run python server.py --host 0.0.0.0 --port 8686 \
@@ -62,31 +80,46 @@ uv run python server.py --host 0.0.0.0 --port 8686 \
   --auth passcode --session-days 14
 ```
 
-3. **内网 / 局域网部署**（让 Turnline 自动生成本地 CA 并签发服务端证书，需要系统安装 OpenSSL 且支持 `fcntl`）：
+### 后台常驻运行（systemd 用户服务）
+
+Linux 服务器或内网主机推荐使用 `Makefile` 与 `scripts/service.sh` 一键安装为 `systemd --user` 服务，内网与公网实例可并存且互不干扰（默认分别注册为 `turnline-lan.service` 与 `turnline-public.service`）：
 
 ```bash
-uv run python server.py --host 0.0.0.0 --self-signed \
-  --public-url https://192.168.1.5:8686 --auth passcode
+# 预览生成的服务文件（不写入磁盘）
+make service-render MODE=lan LAN_HOST=192.168.1.5
+
+# 安装并启动内网服务
+make service-install MODE=lan LAN_HOST=192.168.1.5
+
+# 安装并启动公网服务（可同时运行在不同端口，例如 PUBLIC_PORT=8687）
+make service-install MODE=public PUBLIC_PORT=8687 \
+  TLS_CERT=/etc/letsencrypt/live/your.domain/fullchain.pem \
+  TLS_KEY=/etc/letsencrypt/live/your.domain/privkey.pem
+
+# 查看状态 / 实时日志 / 卸载
+make service-status MODE=public
+make service-logs MODE=public
+make service-uninstall MODE=public
 ```
 
-启动后，程序会打印本地 CA 证书路径。将该 CA 证书导入手机或电脑的系统信任库后，即可正常打开该 HTTPS 地址并使用麦克风。后续重启会自动复用状态目录中的 CA 与有效证书。若纯个人可信局域网不需要口令，可显式传入 `--auth none`。
+> 若服务器需要退出 SSH 后仍保持用户服务常驻，请执行一次 `loginctl enable-linger $USER`。
 
 ### 访问控制与会话管理
 
 启用 `--auth passcode` 后，未解锁的浏览器只能访问静态页面，所有 PipiClaw 中转接口与语音接口（含 WebSocket）均会被拦截；登录接口内置单 IP 渐进锁定与全局防爆破保护。
 
 ```bash
-# 查看口令配置状态与当前已认证会话数
-uv run python server.py auth status [--state-dir DIR]
+# 查看口令配置状态与当前已认证会话数（也可直接用 uv run python server.py auth ...）
+make auth-status STATE_DIR=~/.local/state/turnline-public
 
 # 修改访问口令（会自动吊销所有旧会话）
-uv run python server.py auth set-passcode [--state-dir DIR]
+make auth-set STATE_DIR=~/.local/state/turnline-public
 
 # 一键吊销所有已登录设备（设备丢失时使用）
-uv run python server.py auth revoke [--state-dir DIR]
+make auth-revoke STATE_DIR=~/.local/state/turnline-public
 ```
 
-也支持通过环境变量 `TURNLINE_PASSCODE_FILE`（推荐，配合 systemd `LoadCredential`）或 `TURNLINE_PASSCODE` 提供口令，优先级高于 `auth.json`。
+也支持通过环境变量 `TURNLINE_PASSCODE_FILE`（推荐，安装服务时可传 `PASSCODE_FILE=/path/to/passcode`）或 `TURNLINE_PASSCODE` 提供口令，优先级高于 `auth.json`。
 
 ## 启动参数与环境变量
 

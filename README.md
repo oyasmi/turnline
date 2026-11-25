@@ -14,22 +14,21 @@ Turnline 是为 [PipiClaw](https://github.com/oyasmi/pipiclaw) 打造的本地�
 开始前请准备 [uv](https://docs.astral.sh/uv/)，以及 Chrome 或 Edge 浏览器。在仓库根目录运行：
 
 ```bash
-uv sync --locked --python 3.13
-uv run python setup_models.py
-uv run python server.py --demo
+make setup
+make demo
 ```
 
-首次运行会安装 Python 依赖，并将语音模型下载到 `models/`。服务启动后，打开 <http://127.0.0.1:8686> 即可在演示模式下发送文字，或点击「开始通话」体验完整语音交互。
+首次运行会安装 Python 依赖，并将语音模型下载到 `models/`（也可直接执行 `uv sync --locked --python 3.13 && uv run python setup_models.py && uv run python server.py --demo`）。服务启动后，打开 <http://127.0.0.1:8686> 即可在演示模式下发送文字，或点击「开始通话」体验完整语音交互。
 
 ### 连接本机 PipiClaw
 
 启动本机 PipiClaw 的 Web API 后，直接运行：
 
 ```bash
-uv run python server.py
+make run
 ```
 
-Turnline 默认通过本机 Unix Socket 自动中转，无需额外配置。如果你希望由浏览器直接连接远端或独立部署的 PipiClaw，可在页面右上角「通话设置」中切换到「浏览器直连」。
+运行 `make`（或 `make help`）可查看全部快捷命令，包括内网/公网 HTTPS 部署、口令管理、systemd 后台服务安装、自动化测试与 Android 构建。Turnline 默认通过本机 Unix Socket 自动中转，无需额外配置。如果你希望由浏览器直接连接远端或独立部署的 PipiClaw，可在页面右上角「通话设置」中切换到「浏览器直连」。
 
 > 手机、局域网或公网访问 Web 版时，浏览器要求使用受信任的 HTTPS 才能开启麦克风，且建议使用内置的 `--auth passcode` 访问控制保护服务。配置方式见 [连接与部署](docs/deployment.md)。
 

@@ -13,7 +13,7 @@ uv run python setup_models.py
 npm ci
 npx playwright install --only-shell chromium
 
-# 运行四套核心测试
+# 运行四套核心测试（或直接运行 make test / make test-all）
 uv run --no-sync python -m unittest discover -s test
 npm test
 npm run test:browser
