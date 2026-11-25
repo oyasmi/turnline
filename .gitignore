@@ -1,11 +1,15 @@
-# Bytecode and test output
+# Python caches
 __pycache__/
 *.py[cod]
 /.cache/
 /.pytest_cache/
+
+# Test output and local builds
 /artifacts/
 /playwright-report/
 /test-results/
+*.apk
+*.aab
 
 # Local dependencies and downloaded speech models
 /.venv/
@@ -16,8 +20,14 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.netrc
+.pypirc
 *.key
 *.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Editor and OS files
 /.idea/
