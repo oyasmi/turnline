@@ -17,10 +17,11 @@ export class WaitingFeedback {
     this.longTimer = setTimeout(() => this.update(3), 2500);
   }
 
-  update(stage = this.stage, tool = this.tool) {
+  update(stage = this.stage, tool = this.tool, toolLabel = this.toolLabel) {
     this.stage = stage;
     this.tool = tool;
-    if (this.active) this.show(this.stage, this.tool);
+    this.toolLabel = tool ? toolLabel : undefined;
+    if (this.active) this.show(this.stage, this.tool, this.toolLabel);
   }
 
   stop() {
@@ -31,7 +32,8 @@ export class WaitingFeedback {
     this.active = false;
     this.stage = 0;
     this.tool = false;
+    this.toolLabel = undefined;
     this.stopTone();
-    this.show(0, false);
+    this.show(0, false, undefined);
   }
 }

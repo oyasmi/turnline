@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 const scope = new CallScope($('call-scope'));
 let waiting = 0;
 let tool = false;
+let toolLabel;
 
 export function setIcon(element, name) {
   element.querySelector('use')?.setAttribute('href', '/assets/icons.svg#' + name);
@@ -21,7 +22,7 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
     listening: holdMode ? ['等待你说话', '按住光球或空格，松开发送。'] : ['正在聆听', '说完稍作停顿即可发送。'],
     recognizing: ['正在听你说', '点光球可以立即发送。'],
     pausing: ['等你继续说', '点光球可以立即发送。'],
-    thinking: [tool ? '正在查询' : pendingPlayback ? '正在合成' : waiting >= 2 ? '正在思考' : '等待回复',
+    thinking: [tool ? (toolLabel || '正在查询') : pendingPlayback ? '正在合成' : waiting >= 2 ? '正在思考' : '等待回复',
       tool ? '正在等待 PipiClaw 工具返回。' : '回复也会显示在对话记录里。'],
     speaking: ['正在播报', duplex && !state.muted ? '你可以直接开口插话。' : '点光球或「打断」即可继续说。'],
   }[phase];
@@ -93,9 +94,10 @@ export function updateCallTitle() {
 
 export function showLevel(channel, rms) { scope.level(channel, rms); }
 
-export function showWaiting(stage, hasTool) {
+export function showWaiting(stage, hasTool, label) {
   waiting = stage;
   tool = hasTool;
+  toolLabel = hasTool ? label : undefined;
 }
 
 export function showDraft(text, remaining) {

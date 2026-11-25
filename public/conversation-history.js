@@ -1,8 +1,11 @@
-import { isConversationId, listConversationIds, listConversationItems } from './responses.js';
+import {
+  deleteConversation, getConversation, isConversationId, listConversationIds, listConversationItems,
+} from './responses.js';
 import { store, stored } from './settings.js';
 
 const PAGE_SIZE = 12;
 const storageKey = settings => 'turnline.direct-conversations.v1:' + settings.url;
+const titleCache = new Map();
 
 function directIds(settings) {
   try {
@@ -16,6 +19,19 @@ export function rememberConversation(settings, id) {
   if (settings.mode !== 'direct' || !isConversationId(id)) return;
   const ids = directIds(settings);
   if (ids[0] !== id) store(storageKey(settings), JSON.stringify([id, ...ids.filter(other => other !== id)]));
+}
+
+export function forgetConversation(settings, id) {
+  titleCache.delete(id);
+  if (settings.mode !== 'direct' || !isConversationId(id)) return;
+  const ids = directIds(settings).filter(other => other !== id);
+  store(storageKey(settings), JSON.stringify(ids));
+}
+
+export function cacheConversationTitle(id, title) {
+  if (isConversationId(id) && typeof title === 'string' && title.trim()) {
+    titleCache.set(id, title.trim());
+  }
 }
 
 export function conversationText(item) {
@@ -32,20 +48,33 @@ async function historyPage({ settings, after, ids }, signal) {
 }
 
 async function preview(settings, id, signal) {
+  const cached = titleCache.get(id);
+  if (cached) return cached;
   try {
+    const conv = await getConversation(settings, id, signal).catch(error => {
+      if ([401, 403, 404].includes(error.status)) throw error;
+      return null;
+    });
+    const metaTitle = conv?.metadata?.title;
+    if (typeof metaTitle === 'string' && metaTitle.trim()) {
+      titleCache.set(id, metaTitle.trim());
+      return metaTitle.trim();
+    }
     const { data } = await listConversationItems(settings, id, undefined, signal, 'asc', 4);
     const user = data.find(item => item?.type === 'message' && item.role === 'user' && conversationText(item));
     const text = conversationText(user ?? data.find(item => item?.type === 'message' && conversationText(item)));
     const characters = Array.from(text.replace(/\s+/gu, ' ').trim());
-    return characters.length > 60 ? characters.slice(0, 60).join('') + '…'
+    const title = characters.length > 60 ? characters.slice(0, 60).join('') + '…'
       : characters.join('') || '空白对话 · ' + id.slice(-8);
+    if (characters.length) titleCache.set(id, title);
+    return title;
   } catch (error) {
     if (signal.aborted || [401, 403, 404].includes(error.status)) return;
     return '会话 · ' + id.slice(-8);
   }
 }
 
-export function bindConversationHistory({ settings, current, select }) {
+export function bindConversationHistory({ settings, current, select, onDeleteCurrent }) {
   const dialog = document.getElementById('conversation-history');
   const list = document.getElementById('conversation-list');
   const status = document.getElementById('conversation-status');
@@ -78,6 +107,31 @@ export function bindConversationHistory({ settings, current, select }) {
     }
   }
 
+  async function remove(view, id, row) {
+    if (view.busy) return;
+    view.busy = true;
+    more.disabled = true;
+    list.inert = true;
+    status.textContent = '正在删除会话…';
+    try {
+      const deadline = AbortSignal.any([view.controller.signal, AbortSignal.timeout(5_000)]);
+      await deleteConversation(view.settings, id, deadline);
+      if (view.controller.signal.aborted) return;
+      forgetConversation(view.settings, id);
+      row.remove();
+      if (id === current()) onDeleteCurrent?.();
+      status.textContent = list.childElementCount ? '' : '暂无可打开的会话。';
+    } catch (error) {
+      if (!view.controller.signal.aborted) status.textContent = error.message;
+    } finally {
+      if (view === activeView) {
+        view.busy = false;
+        more.disabled = false;
+        list.inert = false;
+      }
+    }
+  }
+
   async function load(view) {
     if (!view || view.busy) return;
     view.busy = true;
@@ -94,6 +148,7 @@ export function bindConversationHistory({ settings, current, select }) {
         if (!title) continue;
         const id = data[index];
         const row = document.createElement('li');
+        row.className = 'conversation-row';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'button ghost conversation-choice';
@@ -109,7 +164,28 @@ export function bindConversationHistory({ settings, current, select }) {
         } else {
           button.onclick = () => void choose(view, id);
         }
-        row.append(button);
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'button subtle conversation-delete';
+        del.textContent = '删除';
+        del.setAttribute('aria-label', '删除会话 ' + title);
+        let confirmTimer;
+        del.onclick = () => {
+          if (!confirmTimer) {
+            del.textContent = '确认？';
+            del.classList.add('confirming');
+            confirmTimer = setTimeout(() => {
+              confirmTimer = undefined;
+              del.textContent = '删除';
+              del.classList.remove('confirming');
+            }, 3000);
+            return;
+          }
+          clearTimeout(confirmTimer);
+          confirmTimer = undefined;
+          void remove(view, id, row);
+        };
+        row.append(button, del);
         list.append(row);
       }
       view.after = data.at(-1) ?? view.after;

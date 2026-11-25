@@ -119,6 +119,8 @@ a.button { text-decoration: none; }
 .entry.commentary { color: var(--muted); font-size: 13px; }
 .entry.commentary details { border-left: 2px solid var(--line); padding-left: 11px; }
 .entry.commentary summary { cursor: pointer; min-height: var(--target); align-content: center; }
+.entry[data-level="error"], .entry[data-level="warning"] { border-left: 3px solid var(--danger, #e05d5d); padding-left: 11px; }
+.entry[data-level="warning"] { border-left-color: var(--warn, #d99b26); }
 .entry-actions { display: flex; flex-wrap: wrap; margin: 4px 0 0 -8px; }
 .entry-actions .button { min-height: 34px; padding: 4px 8px; font-size: 12px; }
 @media (hover: hover) {
@@ -151,7 +153,9 @@ dialog form, .diagnostics-content, .conversation-history-content { padding: 18px
 .conversation-history-content [role="status"]:empty { margin: 0; }
 .conversation-list { display: grid; gap: 6px; margin: 8px 0; padding: 0; list-style: none; }
 .conversation-list:empty { display: none; }
-.conversation-choice { width: 100%; justify-content: space-between; text-align: start; }
+.conversation-row { display: flex; align-items: stretch; gap: 6px; }
+.conversation-choice { flex: 1; min-width: 0; justify-content: space-between; text-align: start; }
+.conversation-delete { flex-shrink: 0; padding-inline: 10px; font-size: 12px; }
 .conversation-choice span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .conversation-choice[aria-current="true"] { color: var(--ink); opacity: 1; }
 .conversation-choice small { flex-shrink: 0; color: var(--muted); }

@@ -14,12 +14,14 @@ def error(message, status=400):
     return JSONResponse({"error": {"message": str(message)}}, status_code=status)
 
 
-async def read_json(request):
+async def read_json(request, *, allow_empty=False):
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > BODY_LIMIT:
             raise HTTPException(413, "请求内容过大。")
         body.extend(chunk)
+    if allow_empty and not body.strip():
+        return {}
     try:
         return json.loads(body)
     except ValueError as exc:

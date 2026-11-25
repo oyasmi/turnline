@@ -8,10 +8,13 @@ import { announce, clearCaption, renderCall, setIcon, showDraft, showLevel, show
 import { bindShortcuts, updateMediaSession, vibrate } from './call-controls.js';
 import { ResponseTurn } from './response-turn.js';
 import { WaitingFeedback } from './waiting.js';
-import { bindConversationHistory, conversationText, rememberConversation } from './conversation-history.js';
+import { bindConversationHistory, cacheConversationTitle, conversationText, rememberConversation } from './conversation-history.js';
 import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
-import { checkDirectConnection, createConversation, isBackchannel, isConversationId, listConversationItems, normalizeDirectUrl,
-  openResponse } from './responses.js';
+import {
+  CALL_INSTRUCTIONS, cancelResponse, checkDirectConnection, createConversation, isBackchannel, isConversationId,
+  listConversationItems, normalizeDirectUrl, openResponse, resumeResponse, updateConversationMetadata,
+} from './responses.js';
+import { ResponsesSocket } from './responses-ws.js';
 import { splitSpeech } from './chunker.js';
 import { directSettings, preferences, saveDirectSettings, savePreferences, store, stored } from './settings.js';
 import { Transcript } from './transcript.js';
@@ -61,8 +64,11 @@ let connectionDetail;
 let connectionGeneration = 0;
 let relayAvailable = false;
 let conversation;
+let conversationTitled = false;
 let opening;
 let updates;
+let responsesSocket;
+let pendingSteer;
 let pendingUpdates = [];
 let call;
 let turn;
@@ -92,8 +98,8 @@ const trace = new CallTrace({ getItem: stored, setItem: store }, (count, availab
 const voice = new VoiceSession(onVoice);
 const player = new SpeechPlayer(voice, onPlayback);
 const barge = new BargeIn(player, onBarge);
-const waiting = new WaitingFeedback((stage, tool) => {
-  showWaiting(stage, tool);
+const waiting = new WaitingFeedback((stage, tool, toolLabel) => {
+  showWaiting(stage, tool, toolLabel);
   render();
 }, () => {
   if (settings.tones && settings.waitingTone && call?.ready && turn?.voice && state.input === 'quiet' &&
@@ -160,6 +166,7 @@ function watchConversation(id, cursor) {
 
 function showRestoredConversation(id, page) {
   conversation = id;
+  conversationTitled = page.data.length > 0;
   store(conversationKey(), id);
   rememberConversation(settings, id);
   let lastAnswer;
@@ -257,9 +264,10 @@ function ensureConversation() {
   const attempt = { controller };
   const key = conversationKey();
   opening = attempt;
-  attempt.promise = createConversation(settings, controller.signal).then(id => {
+  attempt.promise = createConversation(settings, controller.signal, { source: 'turnline' }).then(id => {
     if (opening !== attempt) throw new DOMException('Conversation changed', 'AbortError');
     conversation = id;
+    conversationTitled = false;
     store(key, id);
     rememberConversation(settings, id);
     watchConversation(id);
@@ -434,9 +442,22 @@ function showConversationUpdate(text, speak) {
   }
 }
 
+function canSteer(text) {
+  return Boolean(
+    turn && !turn.ended && turn.ws && turn.responseId && !turn.firstAudio && !player.playing &&
+    settings.mode === 'relay' && !text.trim().startsWith('/'),
+  );
+}
+
 function drainWaiting() {
-  if (!canCall() || state.input !== 'quiet' || state.output !== 'idle' || turn && !turn.ended) return;
+  if (!canCall() || state.input !== 'quiet') return;
   if (['connecting', 'reconnecting'].includes(state.connection)) return;
+  if (voiceQueue.length && canSteer(voiceQueue[0].text)) {
+    const queued = voiceQueue.shift();
+    void send(queued.text, queued, queued.display);
+    return;
+  }
+  if (state.output !== 'idle' || turn && !turn.ended) return;
   const queued = voiceQueue.shift();
   if (queued) {
     void send(queued.text, queued, queued.display);
@@ -467,11 +488,16 @@ function interrupt(note = true, reason = 'interrupted') {
     if (!previous.ended) {
       updates?.interrupted();
       trace.finish(previous.traceItem, reason, clock() - previous.startedAt);
+      if (previous.ws) responsesSocket?.cancel(previous.responseId);
+      else if (previous.background && previous.responseId) {
+        void cancelResponse(previous.settings, previous.responseId).catch(() => {});
+      }
     }
     waiting.stop();
     previous.ended = true;
     previous.controller.abort();
   }
+  pendingSteer = undefined;
   turn = undefined;
   player.stop();
   waiting.stop();
@@ -761,10 +787,32 @@ function enqueue(current, phrase, range, firstTextAt) {
   if (shouldRender) render();
 }
 
+function ensureResponsesSocket() {
+  if (settings.mode !== 'relay' || settings.context !== 'conversation' || !('WebSocket' in window)) return undefined;
+  if (!responsesSocket || responsesSocket.url !== settings.url) {
+    responsesSocket?.close();
+    responsesSocket = new ResponsesSocket(settings.url);
+  }
+  return responsesSocket;
+}
+
+function shortTitle(text) {
+  const chars = Array.from(text.replace(/\s+/gu, ' ').trim());
+  return chars.length > 60 ? chars.slice(0, 60).join('') + '…' : chars.join('');
+}
+
 async function send(text, timing, display, quiet = false) {
   if (!canCall() || !text.trim()) return;
   if (text.length > 12000) {
     showError('这条消息过长，请分段发送。');
+    return;
+  }
+  // Mid-turn steering over WebSocket: when the assistant is still thinking or
+  // running tools (not yet speaking), steer the running turn instead of
+  // aborting its progress.
+  if (canSteer(text) && responsesSocket?.steer(text, turn.responseId)) {
+    if (!display) transcript.add('user', text);
+    pendingSteer = { text, timing, quiet };
     return;
   }
   interrupt();
@@ -784,11 +832,15 @@ async function send(text, timing, display, quiet = false) {
     metric: (name, value) => setMetric(current, name, value),
     text(entry) {
       entry.display ??= transcript.add('assistant');
-      transcript.update(entry.display, entry.text, entry.phase === 'commentary', entry.done);
+      transcript.update(entry.display, entry.text, entry.phase === 'commentary', entry.done, {
+        level: entry.level, keepExpanded: entry.spokenAsCommentary,
+      });
     },
     track: id => updates?.track(id),
     enqueue: (phrase, range, at) => enqueue(current, phrase, range, at),
-    tool: active => waiting.update(undefined, active),
+    tool: (active, label) => waiting.update(undefined, active, label),
+    notice: (level, message) => transcript.notice(level, message),
+    usage: value => trace.usage(current.traceItem, value),
   });
   turn = current;
   if (current.voice) current.playback = player.begin();
@@ -806,23 +858,94 @@ async function send(text, timing, display, quiet = false) {
   interruption = '';
   const { signal } = current.controller;
   render();
+  let steerFallback;
   try {
     if (current.settings.context === 'conversation') await ensureConversation();
     if (signal.aborted) return;
+    if (conversation && !conversationTitled && !text.trim().startsWith('/')) {
+      conversationTitled = true;
+      const title = shortTitle(text);
+      cacheConversationTitle(conversation, title);
+      void updateConversationMetadata(current.settings, conversation, { source: 'turnline', title }).catch(() => {});
+    }
     current.sentAt = clock();
     if (timing) setMetric(current, 'endpointToRequest', current.sentAt - timing.endpointAt);
-    const events = await openResponse(current.settings, {
-      conversation, messages: history.slice(-16), text, voice: current.voice, interruption: previousInterruption,
-    }, signal);
-    let completed = false;
-    for await (const event of events) {
-      if (signal.aborted || turn !== current) return;
-      if (current.event(event)) {
-        completed = true;
-        break;
+
+    const instructions = current.voice
+      ? [CALL_INSTRUCTIONS, current.settings.instructions, previousInterruption].filter(Boolean).join('\n')
+      : undefined;
+
+    const consume = async events => {
+      for await (const event of events) {
+        if (signal.aborted || turn !== current) return 'aborted';
+        if (event.type === 'response.steer.accepted') continue;
+        if (event.type === 'response.steer.failed') {
+          if (pendingSteer) {
+            steerFallback = pendingSteer;
+            pendingSteer = undefined;
+          }
+          continue;
+        }
+        if (event.type === 'response.created' && current.steered) {
+          pendingSteer = undefined;
+        }
+        if (current.event(event)) return 'completed';
+      }
+      return 'disconnected';
+    };
+
+    let outcome = 'disconnected';
+    const socket = ensureResponsesSocket();
+    if (socket && conversation) {
+      try {
+        current.ws = true;
+        const wsPayload = {
+          model: current.settings.model,
+          conversation,
+          input: text,
+          ...(instructions ? { instructions } : {}),
+        };
+        outcome = await consume(socket.create(wsPayload, signal));
+      } catch (error) {
+        if (signal.aborted || current.responseId) throw error;
+        current.ws = false;
+        socket.close();
       }
     }
-    if (!completed) throw new Error('回复提前断开。可查看已有文字或发送下一条。');
+
+    if (!current.ws) {
+      const useBackground = current.settings.context === 'conversation' && Boolean(conversation);
+      current.background = useBackground;
+      const openInitial = () => openResponse(current.settings, {
+        conversation, messages: history.slice(-16), text, voice: current.voice,
+        interruption: previousInterruption, background: useBackground,
+      }, signal);
+      try {
+        outcome = await consume(await openInitial());
+      } catch (error) {
+        if (signal.aborted || !useBackground || !current.responseId || current.lastSequence === undefined || error.status) {
+          throw error;
+        }
+      }
+      if (outcome === 'disconnected' && useBackground && !signal.aborted &&
+          current.responseId && current.lastSequence !== undefined) {
+        for (const delayMs of [600, 1500, 3000]) {
+          if (signal.aborted || turn !== current) break;
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          if (signal.aborted || turn !== current) break;
+          try {
+            const resumed = await resumeResponse(current.settings, current.responseId, current.lastSequence, signal);
+            outcome = await consume(resumed);
+            if (outcome !== 'disconnected') break;
+          } catch (error) {
+            if (signal.aborted || error.status === 400 || error.status === 404) break;
+          }
+        }
+      }
+    }
+
+    if (outcome === 'aborted') return;
+    if (outcome !== 'completed') throw new Error('回复提前断开。可查看已有文字或发送下一条。');
     const answers = current.answer;
     const answer = answers.map(entry => entry.text).join('\n');
     transcript.retryFor(answers.at(-1)?.display);
@@ -851,13 +974,15 @@ async function send(text, timing, display, quiet = false) {
       }
     }
   } finally {
-
     current.ended = true;
     if (turn === current) {
       waiting.stop();
       if (current.playback) player.seal(current.playback);
       else dispatch({ type: 'playback-ended', waiting: false });
     }
+  }
+  if (steerFallback && !signal.aborted) {
+    void send(steerFallback.text, steerFallback.timing, true, steerFallback.quiet);
   }
 }
 
@@ -881,13 +1006,19 @@ function newSession({ forget = true } = {}) {
   interrupt(false, 'new_conversation');
   history = [];
   conversation = undefined;
+  conversationTitled = false;
   interruption = '';
   transcript.clear();
   for (const name of Object.keys(metrics)) showMetric(name);
   showError();
 }
 
-bindConversationHistory({ settings: () => settings, current: () => conversation, select: selectConversation });
+bindConversationHistory({
+  settings: () => settings,
+  current: () => conversation,
+  select: selectConversation,
+  onDeleteCurrent: () => newSession({ forget: true }),
+});
 
 function openSettings() {
   $('instructions').value = settings.instructions;
@@ -1207,7 +1338,10 @@ $('composer').onsubmit = event => {
 
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 setInterval(updateDuration, 250);
-window.addEventListener('pagehide', hangUp);
+window.addEventListener('pagehide', () => {
+  responsesSocket?.close();
+  hangUp();
+});
 trace.save();
 if (directMode) $('home').href = '/direct';
 void refreshConnection();

@@ -60,7 +60,7 @@ export function normalizeDirectUrl(value, turnlineOrigin) {
   return url.origin + '/v1';
 }
 
-async function request(settings, path, body, signal) {
+async function request(settings, path, body, signal, method) {
   const url = settings.url + path;
   const headers = {};
   const options = { headers, signal, redirect: 'error' };
@@ -69,9 +69,10 @@ async function request(settings, path, body, signal) {
     options.credentials = 'omit';
     if (url.startsWith('http:')) options.targetAddressSpace = 'loopback';
   }
+  if (method) options.method = method;
   if (body !== undefined) {
     headers['content-type'] = 'application/json';
-    options.method = 'POST';
+    options.method ??= 'POST';
     options.body = JSON.stringify(body);
   }
   let response;
@@ -85,8 +86,15 @@ async function request(settings, path, body, signal) {
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    const error = new Error(payload?.error?.message ?? '后端返回 HTTP ' + response.status + '。');
+    const retryHeader = response.headers.get('retry-after');
+    const retryAfter = retryHeader && /^\d+$/.test(retryHeader.trim()) ? Number(retryHeader.trim()) : undefined;
+    const baseMessage = payload?.error?.message ?? '后端返回 HTTP ' + response.status + '。';
+    const message = response.status === 429 && retryAfter
+      ? 'Pipiclaw 正忙，请 ' + retryAfter + ' 秒后重试。'
+      : baseMessage;
+    const error = new Error(message);
     error.status = response.status;
+    if (retryAfter) error.retryAfter = retryAfter;
     throw error;
   }
   return response;
@@ -98,11 +106,26 @@ export async function checkDirectConnection(settings, signal) {
   if (model?.id !== 'pipiclaw') throw new Error('该地址未返回 Pipiclaw 模型。请检查服务地址。');
 }
 
-export async function createConversation(settings, signal) {
-  const response = await request(settings, '/conversations', {}, signal);
+export async function createConversation(settings, signal, metadata) {
+  const response = await request(settings, '/conversations', metadata ? { metadata } : {}, signal);
   const { id } = await response.json();
   if (typeof id !== 'string' || !id) throw new Error('后端没有返回会话 ID。');
   return id;
+}
+
+export async function getConversation(settings, id, signal) {
+  const response = await request(settings, '/conversations/' + encodeURIComponent(id), undefined, signal);
+  return response.json();
+}
+
+export async function updateConversationMetadata(settings, id, metadata, signal) {
+  const response = await request(settings, '/conversations/' + encodeURIComponent(id), { metadata }, signal);
+  return response.json();
+}
+
+export async function deleteConversation(settings, id, signal) {
+  const response = await request(settings, '/conversations/' + encodeURIComponent(id), undefined, signal, 'DELETE');
+  return response.json().catch(() => ({ id, deleted: true }));
 }
 
 export function isConversationId(id) {
@@ -129,10 +152,11 @@ export async function listConversationItems(settings, conversation, after, signa
   return page;
 }
 
-export async function openResponse(settings, { conversation, messages, text, voice, interruption }, signal) {
+export async function openResponse(settings, { conversation, messages, text, voice, interruption, background }, signal) {
   const body = {
     model: settings.model,
     stream: true,
+    ...(background && conversation ? { background: true } : {}),
     ...(voice ? { instructions: [CALL_INSTRUCTIONS, settings.instructions, interruption].filter(Boolean).join('\n') } : {}),
     ...(conversation ? { conversation, input: text } : { store: false, input: messages }),
   };
@@ -141,4 +165,24 @@ export async function openResponse(settings, { conversation, messages, text, voi
     throw new Error('后端没有返回 SSE。请检查该地址是否支持流式 Responses API。');
   }
   return readEvents(response.body);
+}
+
+export async function resumeResponse(settings, responseId, startingAfter, signal) {
+  const query = new URLSearchParams({ stream: 'true' });
+  if (typeof startingAfter === 'number' && startingAfter >= 0) query.set('starting_after', String(startingAfter));
+  const response = await request(settings, '/responses/' + encodeURIComponent(responseId) + '?' + query, undefined, signal);
+  if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+    throw new Error('后端没有返回续流 SSE。');
+  }
+  return readEvents(response.body);
+}
+
+export async function cancelResponse(settings, responseId, signal) {
+  if (!responseId) return;
+  try {
+    await request(settings, '/responses/' + encodeURIComponent(responseId) + '/cancel', {}, signal);
+  } catch (error) {
+    if (error.status === 404 || error.status === 400) return;
+    throw error;
+  }
 }

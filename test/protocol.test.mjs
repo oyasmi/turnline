@@ -4,6 +4,7 @@ import { captureMode, initialCallState, reduceCall } from '../public/call-state.
 import { BargeIn, echoes, matchesEcho, acknowledgement } from '../public/barge-in.js';
 import { splitSpeech } from '../public/chunker.js';
 import { updateSpeech } from '../public/conversation-updates.js';
+import { describeTool, ResponseTurn } from '../public/response-turn.js';
 import { isBackchannel, readEvents } from '../public/responses.js';
 
 test('reads an SSE stream with split CRLF, split UTF-8, comments and multiline data', async () => {
@@ -184,4 +185,90 @@ test('speech offsets refer to the original Markdown around omitted material', ()
   assert.ok(second.offsets.includes(linkLabel));
   assert.ok(!second.offsets.includes(source.indexOf('https:')));
   assert.ok(!second.offsets.includes(source.indexOf('free')));
+});
+
+test('ResponseTurn surfaces tool labels, pipiclaw_failure, pipiclaw_level, usage, and steered successors', () => {
+  const toolStates = [];
+  const notices = [];
+  const spoken = [];
+  const usages = [];
+  const texts = [];
+  const turn = new ResponseTurn({
+    sentAt: 0,
+    voice: true,
+    settings: { reading: 'live' },
+    traceItem: { timing_ms: {} },
+  }, {
+    metric() {},
+    text(entry) { texts.push({ text: entry.text, phase: entry.phase, level: entry.level, spokenAsCommentary: entry.spokenAsCommentary }); },
+    track() {},
+    enqueue(phrase) { spoken.push(phrase); },
+    tool(active, label) { toolStates.push([active, label]); },
+    notice(level, text) { notices.push([level, text]); },
+    usage(u) { usages.push(u); },
+  });
+
+  assert.equal(describeTool('web_search'), '正在搜索网页');
+  assert.equal(describeTool('unknown_tool'), '正在调用工具');
+
+  turn.event({ type: 'response.created', sequence_number: 0, response: { id: 'resp_1', status: 'in_progress' } });
+  assert.equal(turn.responseId, 'resp_1');
+  assert.equal(turn.lastSequence, 0);
+
+  turn.event({
+    type: 'response.output_item.added', sequence_number: 1, output_index: 0,
+    item: { id: 'mcp_1', type: 'mcp_call', name: 'bash', status: 'in_progress' },
+  });
+  assert.deepEqual(toolStates.at(-1), [true, '正在执行命令']);
+
+  turn.event({
+    type: 'response.output_item.done', sequence_number: 2, output_index: 0,
+    item: { id: 'mcp_1', type: 'mcp_call', name: 'bash', status: 'failed', pipiclaw_failure: '命令被安全守卫拦截。' },
+  });
+  assert.deepEqual(toolStates.at(-1), [false, undefined]);
+  assert.deepEqual(notices, [['error', '命令被安全守卫拦截。']]);
+
+  // Steered response ends incomplete without throwing and advances item generation.
+  assert.equal(turn.event({
+    type: 'response.incomplete', sequence_number: 3,
+    response: { id: 'resp_1', status: 'incomplete', incomplete_details: { reason: 'steered' } },
+  }), false);
+
+  turn.event({ type: 'response.created', sequence_number: 0, response: { id: 'resp_2', status: 'in_progress' } });
+  assert.equal(turn.responseId, 'resp_2');
+
+  // Commentary with pipiclaw_level warning
+  turn.event({
+    type: 'response.output_item.added', sequence_number: 1, output_index: 0,
+    item: { id: 'msg_w', type: 'message', role: 'assistant', phase: 'commentary', pipiclaw_level: 'warning', content: [] },
+  });
+  turn.event({
+    type: 'response.output_item.done', sequence_number: 2, output_index: 0,
+    item: {
+      id: 'msg_w', type: 'message', role: 'assistant', phase: 'commentary', pipiclaw_level: 'warning',
+      content: [{ type: 'output_text', text: '正在重试模型请求。' }],
+    },
+  });
+  assert.equal(texts.at(-1).level, 'warning');
+  assert.equal(spoken.length, 0);
+
+  // Final answer on output_index 1
+  turn.event({
+    type: 'response.output_item.added', sequence_number: 3, output_index: 1,
+    item: { id: 'msg_a', type: 'message', role: 'assistant', phase: 'final_answer', content: [] },
+  });
+  turn.event({
+    type: 'response.output_text.delta', sequence_number: 4, output_index: 1, item_id: 'msg_a', delta: '查完了，一切正常。',
+  });
+  assert.equal(turn.event({
+    type: 'response.completed', sequence_number: 5,
+    response: {
+      id: 'resp_2', status: 'completed',
+      usage: { input_tokens: 100, output_tokens: 12, input_tokens_details: { cached_tokens: 80 } },
+      output: [{ id: 'msg_a', type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '查完了，一切正常。' }] }],
+    },
+  }), true);
+  assert.deepEqual(spoken, ['查完了，一切正常。']);
+  assert.equal(usages.length, 1);
+  assert.equal(usages[0].input_tokens, 100);
 });

@@ -98,21 +98,38 @@ export class Transcript {
     return display;
   }
 
-  update(display, text, commentary = false, done = false) {
+  update(display, text, commentary = false, done = false, { level, keepExpanded = false } = {}) {
     const follow = this.following();
-    const changed = display.text !== text || display.commentary !== commentary;
+    const collapsible = commentary && !keepExpanded && level !== 'error' && level !== 'warning';
+    const changed = display.text !== text || display.commentary !== collapsible || display.level !== level;
     display.text = text;
-    display.commentary = commentary;
-    display.row.classList.toggle('commentary', commentary);
-    display.who.textContent = commentary ? '进度' : display.role === 'update' ? '会话更新' : '助手';
-    display.actions.hidden = commentary || !text || !done;
+    display.commentary = collapsible;
+    display.level = level;
+    display.row.classList.toggle('commentary', collapsible);
+    if (level) display.row.dataset.level = level;
+    else delete display.row.dataset.level;
+    display.who.textContent = level === 'error'
+      ? '提示 · 错误'
+      : level === 'warning'
+        ? '提示 · 警告'
+        : commentary
+          ? (keepExpanded ? '过程播报' : '进度')
+          : display.role === 'update' ? '会话更新' : '助手';
+    display.actions.hidden = collapsible || !text || !done;
     if (changed) this.renderText(display);
-    if (commentary && display.summary) display.summary.textContent = done ? '进度 · 已完成' : '进度 · 进行中';
+    if (collapsible && display.summary) display.summary.textContent = done ? '进度 · 已完成' : '进度 · 进行中';
     if (follow) this.scroll();
     else if (changed) {
       this.hasUnread = true;
       this.syncScrollButton();
     }
+  }
+
+  notice(level, text) {
+    if (!text?.trim()) return;
+    const display = this.add('assistant');
+    this.update(display, text, false, true, { level });
+    return display;
   }
 
   renderText(display) {

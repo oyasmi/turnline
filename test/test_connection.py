@@ -1,13 +1,15 @@
 import asyncio
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 from unittest.mock import patch
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 import httpx
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
+from websockets.asyncio.client import connect as ws_connect
 
 from turnline.connection import SessionStore, digest, normalize_origin
 from turnline.server import create_app
@@ -15,6 +17,7 @@ from support import running
 
 CONVERSATION = "conv_" + "c" * 32
 OTHER = "conv_" + "d" * 32
+RESPONSE = "resp_" + "a" * 32
 PREFIX = "/api/pipiclaw/v1"
 
 
@@ -185,5 +188,202 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                                 self.assertEqual(await anext(response.aiter_bytes()), b"data: {}\n\n")
                         await asyncio.wait_for(upstream_cancelled.wait(), 3)
                         self.assertEqual(requests, [{"model": "pipiclaw", "stream": True, "input": "你好",
-                                                     "conversation": CONVERSATION, "instructions": "短答",
-                                                     "reasoning": {"effort": "low"}, "text": {"verbosity": "low"}}])
+                                                     "conversation": CONVERSATION, "instructions": "短答"}])
+
+    async def test_relay_supports_conversation_metadata_delete_and_background_resume(self):
+        with TemporaryDirectory() as directory:
+            state = Path(directory)
+            path = state / "pipiclaw.sock"
+            busy = {"value": True}
+            meta_store = {}
+            cancelled = []
+            upstream = FastAPI()
+
+            @upstream.get("/v1/models/pipiclaw")
+            async def model():
+                return {"id": "pipiclaw"}
+
+            @upstream.post("/v1/conversations")
+            async def create(request: Request):
+                body = await request.json()
+                meta_store[CONVERSATION] = body.get("metadata", {})
+                return {"id": CONVERSATION, "metadata": meta_store[CONVERSATION]}
+
+            @upstream.get("/v1/conversations/{conversation}")
+            async def get_conv(conversation: str):
+                return {"id": conversation, "metadata": meta_store.get(conversation, {})}
+
+            @upstream.post("/v1/conversations/{conversation}")
+            async def update_conv(conversation: str, request: Request):
+                body = await request.json()
+                meta_store[conversation] = body["metadata"]
+                return {"id": conversation, "metadata": meta_store[conversation]}
+
+            @upstream.delete("/v1/conversations/{conversation}")
+            async def delete_conv(conversation: str):
+                if busy["value"]:
+                    return JSONResponse({"error": {"code": "conversation_busy", "message": "busy"}}, status_code=409)
+                meta_store.pop(conversation, None)
+                return {"id": conversation, "object": "conversation.deleted", "deleted": True}
+
+            @upstream.post("/v1/responses")
+            async def respond(request: Request):
+                body = await request.json()
+                assert body["background"] is True
+
+                async def events():
+                    ev = {"type": "response.created", "sequence_number": 0,
+                          "response": {"id": RESPONSE, "status": "in_progress"}}
+                    yield f"data: {json.dumps(ev)}\n\n".encode()
+                return StreamingResponse(events(), media_type="text/event-stream")
+
+            @upstream.get("/v1/responses/{response_id}")
+            async def retrieve(response_id: str, stream: str | None = None, starting_after: int | None = None):
+                assert response_id == RESPONSE and stream == "true" and starting_after == 0
+
+                async def events():
+                    ev = {"type": "response.completed", "sequence_number": 1,
+                          "response": {"id": RESPONSE, "status": "completed", "output": []}}
+                    yield f"data: {json.dumps(ev)}\n\n".encode()
+                return StreamingResponse(events(), media_type="text/event-stream")
+
+            @upstream.post("/v1/responses/{response_id}/cancel")
+            async def cancel(response_id: str):
+                cancelled.append(response_id)
+                return {"id": response_id, "status": "cancelled"}
+
+            async with running(upstream, uds=path):
+                with patch("turnline.server.SpeechModels"):
+                    app = create_app(socket_path=path, state_dir=state / "state")
+                    async with running(app) as origin, httpx.AsyncClient(base_url=origin, timeout=5) as client:
+                        headers = {"Origin": origin}
+                        await client.get("/api/session")
+                        created = await client.post(
+                            PREFIX + "/conversations", headers=headers, json={"metadata": {"source": "turnline"}}
+                        )
+                        self.assertEqual(created.json(), {"id": CONVERSATION, "metadata": {"source": "turnline"}})
+                        updated = await client.post(
+                            f"{PREFIX}/conversations/{CONVERSATION}", headers=headers,
+                            json={"metadata": {"source": "turnline", "title": "测试标题"}},
+                        )
+                        self.assertEqual(updated.json()["metadata"]["title"], "测试标题")
+                        fetched = await client.get(f"{PREFIX}/conversations/{CONVERSATION}")
+                        self.assertEqual(fetched.json()["metadata"]["title"], "测试标题")
+
+                        async with client.stream(
+                            "POST", PREFIX + "/responses", headers=headers,
+                            json={"input": "查一下", "conversation": CONVERSATION, "background": True},
+                        ) as resp:
+                            body = b"".join([chunk async for chunk in resp.aiter_bytes()])
+                            self.assertIn(RESPONSE.encode(), body)
+
+                        async with client.stream(
+                            "GET", f"{PREFIX}/responses/{RESPONSE}?stream=true&starting_after=0",
+                        ) as resumed:
+                            body = b"".join([chunk async for chunk in resumed.aiter_bytes()])
+                            self.assertIn(b"response.completed", body)
+
+                        cancel_resp = await client.post(f"{PREFIX}/responses/{RESPONSE}/cancel", headers=headers)
+                        self.assertEqual(cancel_resp.status_code, 200)
+                        self.assertEqual(cancelled, [RESPONSE])
+
+                        async with httpx.AsyncClient(base_url=origin, timeout=5) as other:
+                            await other.get("/api/session")
+                            self.assertEqual(
+                                (await other.post(f"{PREFIX}/responses/{RESPONSE}/cancel", headers=headers)).status_code, 404,
+                            )
+
+                        self.assertEqual(
+                            (await client.delete(f"{PREFIX}/conversations/{CONVERSATION}", headers=headers)).status_code, 409,
+                        )
+                        busy["value"] = False
+                        deleted = await client.delete(f"{PREFIX}/conversations/{CONVERSATION}", headers=headers)
+                        self.assertEqual(deleted.status_code, 200)
+                        self.assertEqual((await client.get(PREFIX + "/conversations")).json(),
+                                         {"data": [], "has_more": False})
+
+    async def test_relay_websocket_forwards_create_steer_cancel_and_enforces_ownership(self):
+        with TemporaryDirectory() as directory:
+            state = Path(directory)
+            path = state / "pipiclaw.sock"
+            received = []
+            upstream = FastAPI()
+
+            @upstream.get("/v1/models/pipiclaw")
+            async def model():
+                return {"id": "pipiclaw"}
+
+            @upstream.post("/v1/conversations")
+            async def create():
+                return {"id": CONVERSATION}
+
+            @upstream.websocket("/v1/responses")
+            async def ws_upstream(ws: WebSocket):
+                await ws.accept()
+                try:
+                    while True:
+                        event = json.loads(await ws.receive_text())
+                        received.append(event)
+                        if event["type"] == "response.create":
+                            await ws.send_text(json.dumps({
+                                "type": "response.created", "sequence_number": 0,
+                                "response": {"id": RESPONSE, "status": "in_progress"},
+                            }))
+                        elif event["type"] == "response.steer":
+                            await ws.send_text(json.dumps({
+                                "type": "response.steer.accepted", "sequence_number": 1,
+                                "steer": {"id": "steer_1", "previous_response_id": RESPONSE},
+                            }))
+                            await ws.send_text(json.dumps({
+                                "type": "response.incomplete", "sequence_number": 2,
+                                "response": {"id": RESPONSE, "status": "incomplete",
+                                             "incomplete_details": {"reason": "steered"}},
+                            }))
+                        elif event["type"] == "response.cancel":
+                            await ws.send_text(json.dumps({
+                                "type": "response.cancelled", "sequence_number": 3,
+                                "response": {"id": RESPONSE, "status": "cancelled"},
+                            }))
+                except Exception:
+                    pass
+
+            async with running(upstream, uds=path):
+                with patch("turnline.server.SpeechModels"):
+                    app = create_app(socket_path=path, state_dir=state / "state")
+                    async with running(app) as origin, httpx.AsyncClient(base_url=origin, timeout=5) as client:
+                        headers = {"Origin": origin}
+                        session = await client.get("/api/session")
+                        cookie = session.headers["set-cookie"].split(";", 1)[0]
+                        await client.post(PREFIX + "/conversations", headers=headers)
+
+                        ws_origin = origin.replace("http://", "ws://", 1) + PREFIX + "/responses"
+                        async with ws_connect(ws_origin, additional_headers={"Origin": origin, "Cookie": cookie}) as ws:
+                            # Rejects conversation not owned by this device.
+                            await ws.send(json.dumps({
+                                "type": "response.create", "conversation": OTHER, "input": "越权",
+                            }))
+                            err = json.loads(await ws.recv())
+                            self.assertEqual(err["type"], "error")
+                            self.assertEqual(err["status"], 404)
+
+                            # Valid create -> steer -> cancel flow.
+                            await ws.send(json.dumps({
+                                "type": "response.create", "conversation": CONVERSATION, "input": "查日志",
+                                "instructions": "简短回答",
+                            }))
+                            created_ev = json.loads(await ws.recv())
+                            self.assertEqual(created_ev["type"], "response.created")
+
+                            await ws.send(json.dumps({
+                                "type": "response.steer", "previous_response_id": RESPONSE, "input": "只看今天",
+                            }))
+                            self.assertEqual(json.loads(await ws.recv())["type"], "response.steer.accepted")
+                            self.assertEqual(json.loads(await ws.recv())["type"], "response.incomplete")
+
+                            await ws.send(json.dumps({"type": "response.cancel", "response_id": RESPONSE}))
+                            self.assertEqual(json.loads(await ws.recv())["type"], "response.cancelled")
+
+                        self.assertEqual([item["type"] for item in received],
+                                         ["response.create", "response.steer", "response.cancel"])
+                        self.assertEqual(received[0]["model"], "pipiclaw")
+                        self.assertEqual(received[0]["instructions"], "简短回答")

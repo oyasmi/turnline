@@ -45,6 +45,19 @@ export class CallTrace {
     if (['audio', 'perceived', 'bargeDuck', 'bargePause', 'bargeStop'].includes(name)) this.save();
   }
 
+  usage(item, usage) {
+    if (!item || !usage || typeof usage !== 'object') return;
+    const input = usage.input_tokens;
+    const output = usage.output_tokens;
+    const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens;
+    item.usage = {
+      ...(Number.isFinite(input) ? { input_tokens: input } : {}),
+      ...(Number.isFinite(cached) ? { cached_tokens: cached } : {}),
+      ...(Number.isFinite(output) ? { output_tokens: output } : {}),
+    };
+    this.save();
+  }
+
   finish(item, outcome, duration) {
     if (!item || item.outcome !== 'pending') return;
     item.outcome = outcome;

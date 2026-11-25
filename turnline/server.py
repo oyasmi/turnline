@@ -285,8 +285,20 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
             return await asyncio.to_thread(pipiclaw.sessions.list_conversations, identity, after)
 
         @app.post("/api/pipiclaw/v1/conversations")
-        async def create_conversation(identity=Depends(require_session)):
-            return await pipiclaw.create_conversation(identity)
+        async def create_conversation(request: Request, identity=Depends(require_session)):
+            return await pipiclaw.create_conversation(identity, request)
+
+        @app.get("/api/pipiclaw/v1/conversations/{conversation}")
+        async def get_conversation(conversation: str, identity=Depends(require_session)):
+            return await pipiclaw.get_conversation(conversation, identity)
+
+        @app.post("/api/pipiclaw/v1/conversations/{conversation}")
+        async def update_conversation(request: Request, conversation: str, identity=Depends(require_session)):
+            return await pipiclaw.update_conversation(request, conversation, identity)
+
+        @app.delete("/api/pipiclaw/v1/conversations/{conversation}")
+        async def delete_conversation(conversation: str, identity=Depends(require_session)):
+            return await pipiclaw.delete_conversation(conversation, identity)
 
         @app.get("/api/pipiclaw/v1/conversations/{conversation}/items")
         async def conversation_items(request: Request, conversation: str, identity=Depends(require_session)):
@@ -295,6 +307,23 @@ def create_app(tts_threads=2, *, socket_path=None, state_dir=None, demo_mode=Fal
         @app.post("/api/pipiclaw/v1/responses")
         async def responses(request: Request, identity=Depends(require_session)):
             return await pipiclaw.responses(request, identity)
+
+        @app.get("/api/pipiclaw/v1/responses/{response_id}")
+        async def retrieve_response(request: Request, response_id: str, identity=Depends(require_session)):
+            return await pipiclaw.retrieve_response(request, response_id, identity)
+
+        @app.post("/api/pipiclaw/v1/responses/{response_id}/cancel")
+        async def cancel_response(response_id: str, identity=Depends(require_session)):
+            return await pipiclaw.cancel_response(response_id, identity)
+
+        @app.websocket("/api/pipiclaw/v1/responses")
+        async def responses_ws(ws: WebSocket):
+            cookie, _ = session_cookie(ws)
+            identity = await asyncio.to_thread(pipiclaw.sessions.identity, ws.cookies.get(cookie))
+            if not identity:
+                await ws.close(code=1008)
+                return
+            await pipiclaw.responses_ws(ws, identity)
 
     if demo_mode:
         app.add_api_route("/demo/v1/responses", demo, methods=["POST"])
@@ -375,7 +404,7 @@ def main():
         config = uvicorn.Config(
             app, host=options.host, port=options.port, proxy_headers=False, access_log=False, workers=1,
             ssl_certfile=options.tls_cert, ssl_keyfile=options.tls_key,
-            ws="websockets-sansio", ws_max_size=8192,
+            ws="websockets-sansio", ws_max_size=65536,
         )
         config.load()
         family = socket.AF_INET6 if ":" in options.host else socket.AF_INET
