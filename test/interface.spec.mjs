@@ -250,3 +250,34 @@ test('idle, calling and settings have no serious axe violations', async ({ page 
     expect(audit.violations.filter(issue => ['serious', 'critical'].includes(issue.impact))).toEqual([]);
   }
 });
+
+test('UX enhancements: mode badge, quick prompts, speaker toggle and new-session guard', async ({ page }) => {
+  await fixture(page);
+  await expect(page.locator('#duration')).toBeHidden();
+  await expect(page.locator('#mode-badge')).toHaveText('自动断句');
+  await expect(page.locator('#text-only')).toBeHidden();
+
+  // Clicking a quick prompt sends a message and hides empty state.
+  await page.locator('.prompt-chip').first().click();
+  await expect(page.locator('.entry.assistant strong')).toHaveText('40 GB');
+
+  // First click on new-session enters confirmation state; second click clears.
+  const newSession = page.locator('#new-session');
+  await newSession.click();
+  await expect(newSession).toContainText('确认清空？');
+  await expect(page.locator('.entry.assistant')).toHaveCount(1);
+  await newSession.click();
+  await expect(page.locator('#empty')).toBeVisible();
+  await expect(newSession).toContainText('新对话');
+
+  // Clicking orb in idle starts a call and reveals duration & speaker toggle.
+  await page.getByRole('button', { name: '开启语音通话' }).click();
+  await expect(page.locator('#status')).toHaveText('正在聆听');
+  await expect(page.locator('#duration')).toBeVisible();
+  await expect(page.locator('#mode-badge')).toBeHidden();
+  const speaker = page.locator('#text-only');
+  await expect(speaker).toBeVisible();
+  await expect(speaker).toHaveAttribute('aria-pressed', 'false');
+  await speaker.click();
+  await expect(speaker).toHaveAttribute('aria-pressed', 'true');
+});

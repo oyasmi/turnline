@@ -43,7 +43,8 @@
               <svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19v-4m5 4v-7m5 7V9m5 10V5"/></svg>
               <span class="sr-only"></span>
             </span>
-            <time id="duration">00:00</time>
+            <button id="mode-badge" type="button" class="mode-badge" title="语音输入模式，点击调整">自动断句</button>
+            <time id="duration" hidden>00:00</time>
             <button id="open-diagnostics" type="button" class="button icon-button" aria-label="通话诊断" title="通话诊断" aria-haspopup="dialog">
               <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#info"/></svg>
             </button>
@@ -76,7 +77,7 @@
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#stop"/></svg><span>打断</span>
           </button>
         </div>
-        <p id="shortcut-hint" class="shortcut-hint" hidden><kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断</p>
+        <p id="shortcut-hint" class="shortcut-hint" hidden><span id="shortcut-keys"><kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断</span> <span>·</span> <button id="open-shortcuts" type="button" class="shortcut-trigger"><kbd>?</kbd> 快捷键</button></p>
       </section>
 
       <section class="transcript" aria-labelledby="transcript-title">
@@ -90,18 +91,28 @@
             <button id="new-session" type="button" class="button ghost"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#plus"/></svg>新对话</button>
           </div>
         </header>
-        <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="off" tabindex="0">
-          <div id="empty" class="empty">
-            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#transcript"/></svg>
-            <p>通话内容会显示在这里</p>
-            <p>语音由 Turnline 识别，Pipiclaw 接收文字。</p>
+        <div class="messages-wrap">
+          <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="off" tabindex="0">
+            <div id="empty" class="empty">
+              <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#transcript"/></svg>
+              <p>通话与文字记录会显示在这里</p>
+              <p>开口或直接打字，在同一条会话里与 PipiClaw 协作。</p>
+              <div class="quick-prompts" aria-label="示例问题">
+                <button type="button" class="button ghost prompt-chip" data-prompt="介绍一下语音通话和打字怎么配合使用" disabled>语音和打字怎么配合？</button>
+                <button type="button" class="button ghost prompt-chip" data-prompt="帮我写一个查看当前目录磁盘占用的命令" disabled>查看目录磁盘占用命令</button>
+                <button type="button" class="button ghost prompt-chip" data-prompt="用一句话说明你现在能帮我做什么" disabled>你能帮我做什么？</button>
+              </div>
+            </div>
           </div>
+          <button id="scroll-bottom" type="button" class="button scroll-bottom" hidden>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#arrow-down"/></svg><span>回到底部</span>
+          </button>
         </div>
         <form id="composer" class="composer">
           <label class="sr-only" for="message">文字消息</label>
-          <input id="message" maxlength="12000" autocomplete="off" placeholder="输入文字消息…" disabled>
-          <button id="text-only" type="button" class="button icon-button" aria-label="只看文字回复" title="只看文字回复" aria-pressed="false">
-            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#speaker-off"/></svg>
+          <textarea id="message" rows="1" maxlength="12000" autocomplete="off" placeholder="输入文字消息…" disabled></textarea>
+          <button id="text-only" type="button" class="button icon-button" aria-label="回复时朗读语音" title="回复时朗读语音（点击关闭本轮播报）" aria-pressed="false" hidden>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#speaker"/></svg>
           </button>
           <button id="send-message" class="button send" type="submit" disabled>
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#send"/></svg><span>发送</span>
@@ -133,29 +144,47 @@
         <span id="models">SenseVoice · Matcha</span>
         <span id="trace-count">暂无通话计时</span>
       </div>
-      <dl class="metrics">
-        <div><dt>点击到可说话</dt><dd id="metric-ready">—</dd></div>
-        <div><dt>等待提示</dt><dd id="metric-feedback">—</dd></div>
-        <div><dt>请求到响应创建</dt><dd id="metric-created">—</dd></div>
-        <div><dt>请求到首个推理事件</dt><dd id="metric-reasoning">—</dd></div>
-        <div><dt>请求到首个消息条目</dt><dd id="metric-first-message">—</dd></div>
-        <div><dt>请求到首个工具调用</dt><dd id="metric-first-tool">—</dd></div>
-        <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
-        <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
-        <div><dt>停说到可闻首声</dt><dd id="metric-perceived">—</dd></div>
-        <div><dt>停说到提交</dt><dd id="metric-silence-wait">—</dd></div>
-        <div><dt>首条实时字幕</dt><dd id="metric-partial-lag">—</dd></div>
-        <div><dt>提交到首声</dt><dd id="metric-audio">—</dd></div>
-        <div><dt>开口到暂停</dt><dd id="metric-interruption">—</dd></div>
-        <div><dt>提交到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
-        <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
-        <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
-        <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
-        <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
-        <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
-        <div><dt>首段文本到收到 PCM</dt><dd id="metric-pcm">—</dd></div>
-        <div><dt>播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
-      </dl>
+      <section class="metrics-group">
+        <h3>核心延迟</h3>
+        <dl class="metrics metrics-primary">
+          <div><dt>停说到可闻首声</dt><dd id="metric-perceived">—</dd></div>
+          <div><dt>点击到可说话</dt><dd id="metric-ready">—</dd></div>
+          <div><dt>停说到提交</dt><dd id="metric-silence-wait">—</dd></div>
+          <div><dt>提交到首声</dt><dd id="metric-audio">—</dd></div>
+        </dl>
+      </section>
+      <section class="metrics-group">
+        <h3>收音与识别</h3>
+        <dl class="metrics">
+          <div><dt>首条实时字幕</dt><dd id="metric-partial-lag">—</dd></div>
+          <div><dt>语音识别</dt><dd id="metric-asr">—</dd></div>
+          <div><dt>开口到暂停</dt><dd id="metric-interruption">—</dd></div>
+          <div><dt>提交到发起请求</dt><dd id="metric-endpoint-request">—</dd></div>
+        </dl>
+      </section>
+      <section class="metrics-group">
+        <h3>模型与推理</h3>
+        <dl class="metrics">
+          <div><dt>等待提示</dt><dd id="metric-feedback">—</dd></div>
+          <div><dt>后端回合排队</dt><dd id="metric-backend-queue">—</dd></div>
+          <div><dt>请求到响应创建</dt><dd id="metric-created">—</dd></div>
+          <div><dt>请求到首个推理事件</dt><dd id="metric-reasoning">—</dd></div>
+          <div><dt>请求到首个消息条目</dt><dd id="metric-first-message">—</dd></div>
+          <div><dt>请求到首个工具调用</dt><dd id="metric-first-tool">—</dd></div>
+          <div><dt>请求到首字</dt><dd id="metric-text">—</dd></div>
+        </dl>
+      </section>
+      <section class="metrics-group">
+        <h3>合成与播报</h3>
+        <dl class="metrics">
+          <div><dt>请求到首段可播文本</dt><dd id="metric-speakable">—</dd></div>
+          <div><dt>首字到可播</dt><dd id="metric-text-wait">—</dd></div>
+          <div><dt>首次合成排队</dt><dd id="metric-queue">—</dd></div>
+          <div><dt>合成到首块 PCM</dt><dd id="metric-synthesis">—</dd></div>
+          <div><dt>首段文本到收到 PCM</dt><dd id="metric-pcm">—</dd></div>
+          <div><dt>播报间隙累计</dt><dd id="metric-gaps">—</dd></div>
+        </dl>
+      </section>
       <div class="dialog-actions"><button id="export-timing" type="button" class="button ghost" disabled>导出逐轮计时</button></div>
     </div>
   </dialog>
@@ -167,48 +196,59 @@
         <button id="close-settings" type="button" class="button subtle">关闭</button>
       </header>
       <div class="fields">
-        <label>反应速度
-          <select id="speed">
-            <option value="quick">灵敏</option>
-            <option value="balanced" selected>均衡</option>
-            <option value="patient">耐心</option>
-          </select>
-        </label>
-        <label>播报时机
-          <select id="reading">
-            <option value="live" selected>流式播报</option>
-            <option value="confirmed">确认正文后播报</option>
-          </select>
-        </label>
-        <label>播报语速
-          <select id="rate">
-            <option value="0.9">0.9×</option>
-            <option value="1" selected>1.0×</option>
-            <option value="1.07">1.07×</option>
-            <option value="1.15">1.15×</option>
-          </select>
-        </label>
-        <label>语音输入
-          <select id="input-mode">
-            <option value="auto">自动断句</option>
-            <option value="hold">按住说话</option>
-          </select>
-        </label>
-        <label>最短有效语音
-          <select id="min-voice-seconds">
-            <option value="0">0 秒（关闭）</option>
-            <option value="1">1 秒</option>
-            <option value="2" selected>2 秒</option>
-            <option value="3">3 秒</option>
-            <option value="5">5 秒</option>
-          </select>
-        </label>
-        <label class="checkbox" id="waiting-option"><input id="waiting-tone" type="checkbox" checked>等待较久时播放思考音</label>
-        <label class="checkbox"><input id="tones" type="checkbox" checked>播放通话提示音</label>
-        <label class="checkbox"><input id="duplex" type="checkbox">允许在播报时开口打断</label>
-        <label>补充通话指令
-          <textarea id="instructions" rows="2" maxlength="3000" placeholder="例如，每次只说一个步骤"></textarea>
-        </label>
+        <fieldset class="field-group">
+          <legend>语音输入</legend>
+          <label>语音输入
+            <select id="input-mode">
+              <option value="auto">自动断句</option>
+              <option value="hold">按住说话</option>
+            </select>
+          </label>
+          <label>反应速度
+            <select id="speed">
+              <option value="quick">灵敏</option>
+              <option value="balanced" selected>均衡</option>
+              <option value="patient">耐心</option>
+            </select>
+            <small class="field-hint">控制停顿多久后自动提交；「均衡」会在未说完时多等片刻。</small>
+          </label>
+          <label>最短有效语音
+            <select id="min-voice-seconds">
+              <option value="0">0 秒（关闭）</option>
+              <option value="1">1 秒</option>
+              <option value="2" selected>2 秒</option>
+              <option value="3">3 秒</option>
+              <option value="5">5 秒</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset class="field-group">
+          <legend>语音播报与反馈</legend>
+          <label>播报时机
+            <select id="reading">
+              <option value="live" selected>流式播报</option>
+              <option value="confirmed">确认正文后播报</option>
+            </select>
+            <small class="field-hint">流式播报收到首句即朗读；确认模式会避开中间进度句。</small>
+          </label>
+          <label>播报语速
+            <select id="rate">
+              <option value="0.9">0.9×</option>
+              <option value="1" selected>1.0×</option>
+              <option value="1.07">1.07×</option>
+              <option value="1.15">1.15×</option>
+            </select>
+          </label>
+          <label class="checkbox" id="waiting-option"><input id="waiting-tone" type="checkbox" checked>等待较久时播放思考音</label>
+          <label class="checkbox"><input id="tones" type="checkbox" checked>播放通话提示音</label>
+          <label class="checkbox"><input id="duplex" type="checkbox"><span>允许在播报时开口打断<small class="field-hint">嘈杂环境下建议关闭，避免环境声误停播报。</small></span></label>
+        </fieldset>
+        <fieldset class="field-group">
+          <legend>补充指令</legend>
+          <label>补充通话指令
+            <textarea id="instructions" rows="2" maxlength="3000" placeholder="例如，每次只说一个步骤"></textarea>
+          </label>
+        </fieldset>
       </div>
       <div class="dialog-actions">
         <a id="switch-mode" class="button subtle" href="/direct" hidden>浏览器直连</a>
@@ -220,14 +260,14 @@
   <dialog id="direct-settings" aria-labelledby="direct-title">
     <form id="direct-form">
       <header class="panel-heading">
-        <h2 id="direct-title">浏览器直连 Pipiclaw</h2>
+        <h2 id="direct-title">浏览器直连 PipiClaw</h2>
         <button id="close-direct" class="button subtle" type="button">关闭</button>
       </header>
       <div class="fields">
-        <label>Pipiclaw 地址
+        <label>PipiClaw 地址
           <input id="direct-url" type="url" placeholder="https://pipi.local:8787" autocomplete="off" spellcheck="false" required>
         </label>
-        <label>Pipiclaw Key
+        <label>PipiClaw Key
           <input id="direct-key" type="password" placeholder="pk_…" autocomplete="off" spellcheck="false" required>
         </label>
       </div>
@@ -241,7 +281,7 @@
   <dialog id="microphone-help" aria-labelledby="microphone-title">
     <form method="dialog">
       <h2 id="microphone-title">开启麦克风</h2>
-      <p class="dialog-copy">通话时，Turnline 将你的语音转成文字。Pipiclaw 接收这份文字来回复你。</p>
+      <p class="dialog-copy">通话时，Turnline 将你的语音转成文字。PipiClaw 接收这份文字来回复你。</p>
       <div class="dialog-actions">
         <button type="submit" value="cancel" class="button subtle">取消</button>
         <button id="allow-microphone" type="submit" value="allow" class="button primary">继续通话</button>
@@ -256,6 +296,7 @@
         <div><dt><kbd>M</kbd></dt><dd>静音或取消静音</dd></div>
         <div><dt><kbd>Esc</kbd></dt><dd>打断回复或关闭弹窗</dd></div>
         <div><dt><kbd>/</kbd></dt><dd>聚焦文字输入</dd></div>
+        <div><dt><kbd>Enter</kbd></dt><dd>发送文字（<kbd>Shift</kbd> + <kbd>Enter</kbd> 换行）</dd></div>
         <div><dt><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd></dt><dd>发送文字</dd></div>
       </dl>
       <div class="dialog-actions"><button class="button ghost">关闭</button></div>

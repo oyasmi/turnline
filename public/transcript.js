@@ -3,11 +3,24 @@ import { appendMarkdown } from './markdown.js';
 const ns = 'http://www.w3.org/2000/svg';
 
 export class Transcript {
-  constructor(messages, empty, actions) {
+  constructor(messages, empty, actions, scrollButton) {
     this.messages = messages;
     this.empty = empty;
     this.actions = actions;
+    this.scrollButton = scrollButton;
+    this.hasUnread = false;
     this.timeFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    this.messages.addEventListener('scroll', () => this.syncScrollButton(), { passive: true });
+    this.scrollButton?.addEventListener('click', () => this.scroll());
+  }
+
+  syncScrollButton() {
+    if (!this.scrollButton) return;
+    const atBottom = this.following();
+    if (atBottom) this.hasUnread = false;
+    const scrollable = this.messages.scrollHeight - this.messages.clientHeight > 60;
+    this.scrollButton.hidden = atBottom || !scrollable;
+    this.scrollButton.querySelector('span').textContent = this.hasUnread ? '有新回复' : '回到底部';
   }
 
   button(label, icon, action) {
@@ -78,6 +91,10 @@ export class Transcript {
     this.messages.append(row);
     if (text && role !== 'user') this.update(display, text, false, true);
     if (follow) this.scroll();
+    else {
+      this.hasUnread = true;
+      this.syncScrollButton();
+    }
     return display;
   }
 
@@ -92,6 +109,10 @@ export class Transcript {
     if (changed) this.renderText(display);
     if (commentary && display.summary) display.summary.textContent = done ? '进度 · 已完成' : '进度 · 进行中';
     if (follow) this.scroll();
+    else if (changed) {
+      this.hasUnread = true;
+      this.syncScrollButton();
+    }
   }
 
   renderText(display) {
@@ -149,6 +170,8 @@ export class Transcript {
 
   scroll() {
     this.messages.scrollTop = this.messages.scrollHeight;
+    this.hasUnread = false;
+    this.syncScrollButton();
   }
 
   following() {
@@ -159,7 +182,9 @@ export class Transcript {
     this.retryFor(undefined);
     this.highlight(undefined);
     this.lastMinute = undefined;
+    this.hasUnread = false;
     for (const row of this.messages.querySelectorAll('.entry')) row.remove();
     this.empty.hidden = false;
+    this.syncScrollButton();
   }
 }

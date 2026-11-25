@@ -44,7 +44,7 @@ const transcript = new Transcript($('messages'), $('empty'), {
   error: showError,
   replay: replayMessage,
   retry: () => { void send('请重新回答上一条问题。'); },
-});
+}, $('scroll-bottom'));
 const field = $('message');
 const dialog = $('settings');
 const diagnostics = $('diagnostics');
@@ -132,9 +132,9 @@ function setMetric(current, name, value) {
 function renderConnection() {
   const { label, detail } = {
     checking: { label: '正在连接', detail: '正在检查连接。' },
-    ready: { label: 'Pipiclaw 已连接', detail: '' },
-    setup: { label: '等待设置', detail: '填写你自己的 Pipiclaw 地址和 Key。' },
-    offline: { label: 'Pipiclaw 离线', detail: '请启动 Pipiclaw，再重试连接。' },
+    ready: { label: 'PipiClaw 已连接', detail: '' },
+    setup: { label: '等待设置', detail: '填写你自己的 PipiClaw 地址和 Key。' },
+    offline: { label: 'PipiClaw 离线', detail: '请启动 PipiClaw，再重试连接。' },
     demo: { label: '离线演示', detail: '' },
   }[connection];
   $('backend-label').dataset.connection = connection;
@@ -205,7 +205,7 @@ function conversationKey() {
 }
 
 function directFailure(error) {
-  return error.status === 401 ? 'Pipiclaw 拒绝了这把 Key，请核对或更换 Key。' : error.message;
+  return error.status === 401 ? 'PipiClaw 拒绝了这把 Key，请核对或更换 Key。' : error.message;
 }
 
 async function refreshConnection(directChecked = false) {
@@ -922,7 +922,7 @@ $('direct-form').onsubmit = async event => {
   try {
     const url = normalizeDirectUrl($('direct-url').value, location.origin);
     const key = $('direct-key').value.trim();
-    if (!key || /[^\x21-\x7e]/.test(key)) throw new Error('请输入完整的 Pipiclaw Key。');
+    if (!key || /[^\x21-\x7e]/.test(key)) throw new Error('请输入完整的 PipiClaw Key。');
     const next = { mode: 'direct', url, key };
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(7_000)]);
     await checkDirectConnection(next, signal);
@@ -1101,11 +1101,45 @@ $('allow-microphone').onclick = () => void startCall();
 $('mute').onclick = toggleMute;
 $('interrupt').onclick = () => interrupt();
 $('orb').onclick = () => {
+  if (!call) {
+    $('call').click();
+    return;
+  }
   if (settings.inputMode === 'hold' && !state.muted) return;
   if (callPhase(state) === 'speaking') interrupt();
   else voice.send({ type: 'force-commit' });
 };
-$('new-session').onclick = () => newSession();
+$('mode-badge').onclick = () => {
+  openSettings();
+  $('input-mode').focus();
+};
+$('open-shortcuts').onclick = () => $('shortcuts').showModal();
+let confirmNewTimer;
+function resetNewSessionButton() {
+  clearTimeout(confirmNewTimer);
+  confirmNewTimer = undefined;
+  const button = $('new-session');
+  button.classList.remove('confirming');
+  button.lastChild.textContent = '新对话';
+}
+$('new-session').onclick = () => {
+  const needsConfirm = $('empty').hidden || Boolean(call);
+  if (needsConfirm && !confirmNewTimer) {
+    const button = $('new-session');
+    button.classList.add('confirming');
+    button.lastChild.textContent = '确认清空？';
+    confirmNewTimer = setTimeout(resetNewSessionButton, 3000);
+    return;
+  }
+  resetNewSessionButton();
+  newSession();
+};
+for (const chip of document.querySelectorAll('.prompt-chip')) {
+  chip.onclick = () => {
+    const prompt = chip.dataset.prompt;
+    if (prompt) void send(prompt, undefined, undefined, textOnly);
+  };
+}
 $('toggle-composer').onclick = () => {
   if (!field.disabled) field.focus();
 };
@@ -1134,8 +1168,24 @@ expandButton.onclick = event => {
 };
 $('text-only').onclick = event => {
   textOnly = !textOnly;
-  event.currentTarget.setAttribute('aria-pressed', String(textOnly));
+  const button = event.currentTarget;
+  button.setAttribute('aria-pressed', String(textOnly));
+  setIcon(button, textOnly ? 'speaker-off' : 'speaker');
+  const label = textOnly ? '仅文字回复（已关闭语音播报）' : '回复时朗读语音';
+  button.setAttribute('aria-label', label);
+  button.title = textOnly ? '已关闭本轮语音播报（点击恢复）' : '回复时朗读语音（点击关闭本轮播报）';
 };
+function resizeComposer() {
+  field.style.height = 'auto';
+  field.style.height = Math.min(field.scrollHeight, 120) + 'px';
+}
+field.addEventListener('input', resizeComposer);
+field.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing) {
+    event.preventDefault();
+    field.form.requestSubmit();
+  }
+});
 bindShortcuts($('orb'), field, {
   active: () => Boolean(call), holdMode: () => settings.inputMode === 'hold',
   press: startHold, release: releaseHold, mute: toggleMute, help: () => $('shortcuts').showModal(),
@@ -1151,6 +1201,7 @@ $('composer').onsubmit = event => {
   const text = field.value.trim();
   if (!text) return;
   field.value = '';
+  resizeComposer();
   void send(text, undefined, undefined, textOnly);
 };
 

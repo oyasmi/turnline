@@ -22,7 +22,7 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
     recognizing: ['正在听你说', '点光球可以立即发送。'],
     pausing: ['等你继续说', '点光球可以立即发送。'],
     thinking: [tool ? '正在查询' : pendingPlayback ? '正在合成' : waiting >= 2 ? '正在思考' : '等待回复',
-      tool ? '正在等待 Pipiclaw 工具返回。' : '回复也会显示在对话记录里。'],
+      tool ? '正在等待 PipiClaw 工具返回。' : '回复也会显示在对话记录里。'],
     speaking: ['正在播报', duplex && !state.muted ? '你可以直接开口插话。' : '点光球或「打断」即可继续说。'],
   }[phase];
   if (held && connected && !state.muted) [label, hint] = ['正在听你说', '松开发送语音。'];
@@ -32,11 +32,20 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
   const orb = $('orb');
   const orbPhase = held && connected ? 'recognizing' : phase;
   orb.dataset.state = orbPhase;
-  orb.disabled = !connected || !(holdMode && !state.muted || ['speaking', 'recognizing', 'pausing'].includes(phase));
-  orb.setAttribute('aria-label', holdMode && !state.muted ? '按住说话' : phase === 'speaking' ? '打断播报' : '立即发送语音');
+  orb.dataset.held = String(Boolean(held && connected && !state.muted));
+  orb.disabled = !active
+    ? !canCall
+    : !connected || !(holdMode && !state.muted || ['speaking', 'recognizing', 'pausing'].includes(phase));
+  orb.setAttribute('aria-label', !active
+    ? '开启语音通话'
+    : holdMode && !state.muted ? '按住说话' : phase === 'speaking' ? '打断播报' : '立即发送语音');
   scope.update(!$('error').hidden && ['idle', 'listening'].includes(phase) ? 'error' : orbPhase, state.barge, waiting);
   if ($('status').textContent !== label) $('status').textContent = label;
   $('hint').textContent = hint;
+  $('duration').hidden = !active;
+  const modeBadge = $('mode-badge');
+  modeBadge.hidden = active;
+  modeBadge.textContent = holdMode ? '按住说话' : '自动断句';
   const call = $('call');
   call.querySelector('span').textContent = active ? '挂断' : '开始通话';
   call.classList.toggle('hang-up', active);
@@ -44,6 +53,8 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
   call.disabled = !active && !canCall;
   $('message').disabled = !canCall;
   $('send-message').disabled = !canCall;
+  $('text-only').hidden = !active;
+  for (const chip of document.querySelectorAll('.prompt-chip')) chip.disabled = !canCall;
   const mute = $('mute');
   const muteLabel = state.muted ? '取消静音' : '静音';
   mute.querySelector('span').textContent = muteLabel;
@@ -57,6 +68,9 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
   $('interrupt').hidden = !active && !busy;
   $('interrupt').disabled = !busy;
   $('shortcut-hint').hidden = !active;
+  $('shortcut-keys').innerHTML = holdMode
+    ? '<kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断'
+    : '<kbd>Space</kbd> 按住插话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断';
   const indicator = $('signal');
   indicator.hidden = !active || !signal;
   if (signal) {
