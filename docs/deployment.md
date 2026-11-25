@@ -80,29 +80,25 @@ uv run python server.py --host 0.0.0.0 --port 8686 \
   --auth passcode --session-days 14
 ```
 
-### 后台常驻运行（systemd 用户服务）
+### 后台常驻运行（脚本方式）
 
-Linux 服务器或内网主机推荐使用 `Makefile` 与 `scripts/service.sh` 一键安装为 `systemd --user` 服务，内网与公网实例可并存且互不干扰（默认分别注册为 `turnline-lan.service` 与 `turnline-public.service`）：
+可通过 `Makefile` 与 `scripts/service.sh` 直接在后台启停 Turnline，内网与公网实例各自维护独立的 `turnline.pid` 与 `turnline.log`（位于各自的 `state-dir` 内），可同机并存且互不干扰：
 
 ```bash
-# 预览生成的服务文件（不写入磁盘）
-make service-render MODE=lan LAN_HOST=192.168.1.5
+# 后台启动内网实例（自动检测本机 IP，也可显式传 LAN_HOST=192.168.1.5）
+make start MODE=lan
 
-# 安装并启动内网服务
-make service-install MODE=lan LAN_HOST=192.168.1.5
-
-# 安装并启动公网服务（可同时运行在不同端口，例如 PUBLIC_PORT=8687）
-make service-install MODE=public PUBLIC_PORT=8687 \
+# 后台启动公网实例（独立端口与状态目录）
+make start MODE=public PUBLIC_PORT=8687 \
   TLS_CERT=/etc/letsencrypt/live/your.domain/fullchain.pem \
   TLS_KEY=/etc/letsencrypt/live/your.domain/privkey.pem
 
-# 查看状态 / 实时日志 / 卸载
-make service-status MODE=public
-make service-logs MODE=public
-make service-uninstall MODE=public
+# 查看状态 / 实时日志 / 重启 / 停止
+make status MODE=public
+make logs MODE=public
+make restart MODE=public PUBLIC_PORT=8687 TLS_CERT=... TLS_KEY=...
+make stop MODE=public
 ```
-
-> 若服务器需要退出 SSH 后仍保持用户服务常驻，请执行一次 `loginctl enable-linger $USER`。
 
 ### 访问控制与会话管理
 
@@ -119,7 +115,7 @@ make auth-set STATE_DIR=~/.local/state/turnline-public
 make auth-revoke STATE_DIR=~/.local/state/turnline-public
 ```
 
-也支持通过环境变量 `TURNLINE_PASSCODE_FILE`（推荐，安装服务时可传 `PASSCODE_FILE=/path/to/passcode`）或 `TURNLINE_PASSCODE` 提供口令，优先级高于 `auth.json`。
+也支持通过环境变量 `TURNLINE_PASSCODE_FILE`（推荐，后台启动时可传 `PASSCODE_FILE=/path/to/passcode`）或 `TURNLINE_PASSCODE` 提供口令，优先级高于 `auth.json`。
 
 ## 启动参数与环境变量
 

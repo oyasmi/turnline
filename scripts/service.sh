@@ -2,17 +2,15 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 ACTION="${1:-}"
 if [ -z "$ACTION" ]; then
-  echo "Usage: $0 <render|install|uninstall|status|logs> [options]" >&2
+  echo "Usage: $0 <start|stop|restart|status|logs> [options]" >&2
   exit 2
 fi
 shift
 
 MODE="lan"
-NAME=""
 HOST="127.0.0.1"
 PORT="8686"
 PUBLIC_URL=""
@@ -29,7 +27,6 @@ PASSCODE_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) MODE="$2"; shift 2 ;;
-    --name) NAME="$2"; shift 2 ;;
     --host) HOST="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --public-url) PUBLIC_URL="$2"; shift 2 ;;
@@ -51,15 +48,12 @@ done
 
 case "$MODE" in
   local)
-    DEFAULT_NAME="turnline"
     DEFAULT_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/turnline"
     ;;
   lan)
-    DEFAULT_NAME="turnline-lan"
     DEFAULT_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/turnline-lan"
     ;;
   public)
-    DEFAULT_NAME="turnline-public"
     DEFAULT_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/turnline-public"
     ;;
   *)
@@ -68,22 +62,38 @@ case "$MODE" in
     ;;
 esac
 
-SERVICE_NAME="${NAME:-$DEFAULT_NAME}"
 STATE_DIR="${STATE_DIR:-$DEFAULT_STATE}"
-UNIT_FILE="$UNIT_DIR/$SERVICE_NAME.service"
+PID_FILE="$STATE_DIR/turnline.pid"
+LOG_FILE="$STATE_DIR/turnline.log"
 
-quote_systemd() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  printf '"%s"' "$s"
+is_running() {
+  if [ ! -f "$PID_FILE" ]; then
+    return 1
+  fi
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -z "$pid" ] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null
 }
 
-render_unit() {
+do_start() {
+  if is_running; then
+    echo "Turnline ($MODE) 已在运行 (PID $(cat "$PID_FILE"))，日志: $LOG_FILE"
+    return 0
+  fi
+
   local uv_bin
   uv_bin="$(command -v uv || true)"
   if [ -z "$uv_bin" ]; then
     echo "找不到 uv，请先安装 uv 并确保其在 PATH 中。" >&2
+    exit 1
+  fi
+
+  if [ "$MODE" != "local" ] && [ "$AUTH" = "passcode" ] && [ -z "$PASSCODE_FILE" ] && [ -z "${TURNLINE_PASSCODE_FILE:-}" ] && [ -z "${TURNLINE_PASSCODE:-}" ] && [ ! -f "$STATE_DIR/auth.json" ]; then
+    echo "尚未为 $STATE_DIR 配置访问口令。请先运行：" >&2
+    echo "  make auth-set STATE_DIR=$STATE_DIR" >&2
     exit 1
   fi
 
@@ -94,7 +104,7 @@ render_unit() {
       ;;
     lan)
       if [ -z "$PUBLIC_URL" ]; then
-        echo "内网服务需要提供 --public-url（或通过 make 的 LAN_HOST 指定），例如 https://192.168.1.5:8686" >&2
+        echo "内网启动需要提供 --public-url（或通过 make 的 LAN_HOST 指定），例如 https://192.168.1.5:8686" >&2
         exit 1
       fi
       args+=(--host "0.0.0.0" --port "$PORT" --self-signed --public-url "$PUBLIC_URL"
@@ -102,7 +112,7 @@ render_unit() {
       ;;
     public)
       if [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ]; then
-        echo "公网服务必须提供 --tls-cert 和 --tls-key。" >&2
+        echo "公网启动必须提供 --tls-cert 和 --tls-key。" >&2
         exit 1
       fi
       args+=(--host "0.0.0.0" --port "$PORT" --tls-cert "$TLS_CERT" --tls-key "$TLS_KEY"
@@ -121,71 +131,96 @@ render_unit() {
     args+=(--pipiclaw-socket "$PIPICLAW_SOCKET")
   fi
 
-  local exec_line=""
-  local arg
-  for arg in "${args[@]}"; do
-    if [ -n "$exec_line" ]; then
-      exec_line+=" "
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+
+  local start_line=0
+  if [ -f "$LOG_FILE" ]; then
+    start_line="$(wc -l < "$LOG_FILE")"
+  fi
+
+  (
+    cd "$REPO_DIR"
+    if [ -n "$PASSCODE_FILE" ]; then
+      export TURNLINE_PASSCODE_FILE="$PASSCODE_FILE"
     fi
-    exec_line+="$(quote_systemd "$arg")"
+    nohup "${args[@]}" >> "$LOG_FILE" 2>&1 < /dev/null &
+    echo $! > "$PID_FILE"
+  )
+
+  local pid
+  pid="$(cat "$PID_FILE")"
+  local waited=0
+  while [ "$waited" -lt 15 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      echo "Turnline ($MODE) 启动失败，最近日志：" >&2
+      tail -n +"$((start_line + 1))" "$LOG_FILE" >&2 || true
+      exit 1
+    fi
+    if tail -n +"$((start_line + 1))" "$LOG_FILE" 2>/dev/null | grep -q "^Turnline "; then
+      break
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
   done
 
-  cat <<EOF
-[Unit]
-Description=Turnline ($MODE)
-After=network-online.target
-Wants=network-online.target
+  echo "Turnline ($MODE) 已后台启动 (PID $pid)"
+  echo "日志文件: $LOG_FILE"
+  tail -n +"$((start_line + 1))" "$LOG_FILE" 2>/dev/null | grep -E "^(Turnline |Trust this CA)" || true
+}
 
-[Service]
-Type=simple
-WorkingDirectory=$REPO_DIR
-ExecStart=$exec_line
-Restart=on-failure
-RestartSec=3
-EOF
-  if [ -n "$PASSCODE_FILE" ]; then
-    echo "Environment=TURNLINE_PASSCODE_FILE=$PASSCODE_FILE"
+do_stop() {
+  if ! is_running; then
+    rm -f "$PID_FILE"
+    echo "Turnline ($MODE) 未在运行。"
+    return 0
   fi
-  cat <<EOF
+  local pid
+  pid="$(cat "$PID_FILE")"
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 25 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      echo "Turnline ($MODE) 已停止 (PID $pid)。"
+      return 0
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  echo "Turnline ($MODE) 已强制停止 (PID $pid)。"
+}
 
-[Install]
-WantedBy=default.target
-EOF
+do_status() {
+  if is_running; then
+    echo "Turnline ($MODE) 运行中 (PID $(cat "$PID_FILE"))"
+    echo "状态目录: $STATE_DIR"
+    echo "日志文件: $LOG_FILE"
+  else
+    echo "Turnline ($MODE) 未运行 (状态目录: $STATE_DIR)"
+    exit 1
+  fi
+}
+
+do_logs() {
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "日志文件尚不存在: $LOG_FILE" >&2
+    exit 1
+  fi
+  exec tail -n 50 -f "$LOG_FILE"
 }
 
 case "$ACTION" in
-  render)
-    render_unit
-    ;;
-  install)
-    if [ "$MODE" != "local" ] && [ "$AUTH" = "passcode" ] && [ -z "$PASSCODE_FILE" ] && [ ! -f "$STATE_DIR/auth.json" ]; then
-      echo "尚未为 $STATE_DIR 配置访问口令。请先运行：" >&2
-      echo "  make auth-set STATE_DIR=$STATE_DIR" >&2
-      exit 1
-    fi
-    unit_content="$(render_unit)"
-    mkdir -p "$UNIT_DIR"
-    printf '%s\n' "$unit_content" > "$UNIT_FILE"
-    echo "已写入服务文件: $UNIT_FILE"
-    systemctl --user daemon-reload
-    systemctl --user enable --now "$SERVICE_NAME.service"
-    echo "服务已启动: $SERVICE_NAME.service"
-    echo "提示：如需注销 SSH 后保持后台常驻，可执行：loginctl enable-linger $USER"
-    ;;
-  uninstall)
-    systemctl --user disable --now "$SERVICE_NAME.service" 2>/dev/null || true
-    rm -f "$UNIT_FILE"
-    systemctl --user daemon-reload
-    echo "已卸载服务: $SERVICE_NAME.service"
-    ;;
-  status)
-    systemctl --user status "$SERVICE_NAME.service" --no-pager
-    ;;
-  logs)
-    exec journalctl --user -u "$SERVICE_NAME.service" -f
-    ;;
+  start) do_start ;;
+  stop) do_stop ;;
+  restart) do_stop; do_start ;;
+  status) do_status ;;
+  logs) do_logs ;;
   *)
-    echo "Unknown action: $ACTION" >&2
+    echo "Unknown action: $ACTION (expected start, stop, restart, status, or logs)" >&2
     exit 2
     ;;
 esac
