@@ -31,14 +31,14 @@ uv run python server.py
 
 Turnline 默认通过本机 Unix Socket 自动中转，无需额外配置。如果你希望由浏览器直接连接远端或独立部署的 PipiClaw，可在页面右上角「通话设置」中切换到「浏览器直连」。
 
-> 手机或局域网内的其他设备访问 Web 版时，浏览器要求使用受信任的 HTTPS 才能开启麦克风。配置方式见 [连接与部署](docs/deployment.md)。
+> 手机、局域网或公网访问 Web 版时，浏览器要求使用受信任的 HTTPS 才能开启麦克风，且建议使用内置的 `--auth passcode` 访问控制保护服务。配置方式见 [连接与部署](docs/deployment.md)。
 
 ## 文档导航
 
 | 文档 | 内容 |
 | --- | --- |
-| [Web 使用手册](docs/web-usage.md) | 通话操作、断句与播报设置、文字与历史会话、快捷键及诊断工具 |
-| [连接与部署](docs/deployment.md) | 本机中转、浏览器直连、反向代理、SSH 隧道、HTTPS 证书与启动参数 |
+| [Web 使用手册](docs/web-usage.md) | 通话操作、断句与播报设置、文字与历史会话、口令解锁与退出、快捷键及诊断工具 |
+| [连接与部署](docs/deployment.md) | 本机中转、浏览器直连、反向代理、SSH 隧道、HTTPS 证书、口令访问控制与启动参数 |
 | [Android 使用与构建](docs/android.md) | Android 独立客户端的连接方式、离线双语播报及 APK 构建 |
 | [项目架构](docs/architecture.md) | 仓库结构、语音与对话数据流、会话存储边界与双语发音链路 |
 | [测试手册](docs/testing.md) | 自动化回归、延迟与回声测试、实机验收清单与计时口径 |
