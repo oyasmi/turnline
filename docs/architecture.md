@@ -21,14 +21,15 @@ Turnline 以浏览器 Web 应用为主形态，同端口承载静态界面、本
 ```text
 麦克风 (Web Audio) ──/speech/voice (WS)──▶ TurnEngine + Silero VAD + SenseVoice-Small
                                                               │ 转写提交
-对话面板 (SSE) ◀── /api/pipiclaw 或直连 ◀─────── 浏览器发起 Responses 请求
+对话面板 (WS / SSE) ◀── /api/pipiclaw 或直连 ◀─────── 浏览器发起 Responses 请求
      │ 可播短分句
      └── /speech/synthesize (流式 PCM) ──▶ MatchaFrontend (pypinyin + eSpeak NG) ──▶ Matcha + Vocos
 ```
 
 1. **收音与断句**：浏览器通过 `AudioWorklet` 采集麦克风并重采样，经 `/speech/voice` WebSocket 送入服务端。`voice_session.py` 与 `turn_engine.py` 结合 `speech.py` 中的 Silero VAD 与 SenseVoice-Small，在采集采样时钟上完成实时草稿字幕、句中停顿合并、自适应等待与最短有效语音过滤，最终触发整轮提交。
-2. **对话请求与流式更新**：浏览器将提交的转写文字或手动输入组织为 Responses API 请求，接收 SSE 事件并实时刷新界面。
-   - **服务端中转（默认）**：经 `turnline/connection.py` 通过本机 Unix Socket 转发至 PipiClaw。
+2. **对话请求与流式更新**：浏览器将提交的转写文字或手动输入组织为 Responses API 请求，通过 WebSocket 或 SSE 接收事件并实时刷新界面。
+   - 默认的服务端中转由 `turnline/work_relay.py` 按会话维护活跃回合，每个回合使用独立的 PipiClaw Unix Socket WebSocket。浏览器通过 `response.create` 提交工作，通过 `response.subscribe` 重新订阅，并以桥接游标续接事件。浏览器关闭或切换会话只会解除订阅。短期事件回放使用有界内存缓存，最终结果由 PipiClaw 的会话历史恢复。
+   - 浏览器 WebSocket 无法建立，或中转明确未向 PipiClaw 提交请求时，使用 HTTP 后台 SSE。连接在提交后断开时，浏览器尝试续接工作，避免重复提交。
    - **浏览器直连**：浏览器直接携带用户配置的 PipiClaw 地址与密钥发起请求。
    - **演示模式（`--demo`）**：由服务内置的 `/demo/v1/responses` 生成模拟事件流。
 3. **双语音素化与流式播报**：浏览器将回复切分为可播短句并请求 `/speech/synthesize`。`phonemizer.py` 先对文本做口语清洗与结构化展开（如百分比、容量单位、版本号与混合型号），再分别用中文归一化 + `pypinyin` 和英文 `eSpeak NG` 生成统一的音素序列；`synthesis.py` 调度 Matcha 与 Vocos 以同一副音色流式输出 PCM，由浏览器播放并负责逐句高亮与打断控制。
@@ -37,8 +38,8 @@ Turnline 以浏览器 Web 应用为主形态，同端口承载静态界面、本
 
 ## 会话存储与安全边界
 
-- **对话正文**：始终保存在 PipiClaw 侧，Turnline 不复制完整聊天内容。
-- **服务端中转隔离**：Turnline 在状态目录（默认 `~/.local/state/turnline/`）使用 `devices.sqlite3` 维护匿名浏览器身份与会话归属，并通过 `HttpOnly` + `SameSite=Strict` 会话 Cookie 校验权限。
+- **对话正文**：PipiClaw 持久保存会话历史。Turnline 短期缓存活跃回合事件以便续接。活动回合受 PipiClaw 的 WebSocket 连接时限约束，Turnline 或 PipiClaw 重启也会中断这类回合。
+- **服务端中转隔离**：Turnline 在 `devices.sqlite3` 中记录会话归属。口令模式使用实例级所有者，设备 Cookie 负责登录鉴权，可独立退出或吊销。免口令模式按浏览器隔离。数据库升级会迁移可识别的旧口令会话，归属无法确认的条目保留原浏览器权限。
 - **浏览器直连隔离**：浏览器按 PipiClaw 地址在 `localStorage` 中记住打开过的会话 ID，页面偏好同样保存在 `localStorage`；API 密钥仅保存在当前标签页的 `sessionStorage`，关闭标签页即失效。
 - **语音隐私边界**：Web 版的麦克风音频与待播报文本由 Turnline 服务端本地处理，PipiClaw 只接收转写后的文字消息。服务端通过同源检查与 CSP 限制接口仅对 Turnline 页面开放。
 

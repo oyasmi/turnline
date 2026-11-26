@@ -98,11 +98,28 @@ export class Transcript {
     return display;
   }
 
+  delivery(display, message) {
+    if (!display) return;
+    if (!message) {
+      display.delivery?.remove();
+      display.delivery = undefined;
+      return;
+    }
+    if (!display.delivery) {
+      display.delivery = document.createElement('span');
+      display.delivery.className = 'delivery';
+      display.delivery.setAttribute('role', 'status');
+      display.who.parentElement.append(display.delivery);
+    }
+    display.delivery.textContent = message;
+  }
+
   update(display, text, commentary = false, done = false, { level, keepExpanded = false } = {}) {
     const follow = this.following();
     const collapsible = commentary && !keepExpanded && level !== 'error' && level !== 'warning';
     const changed = display.text !== text || display.commentary !== collapsible || display.level !== level;
     display.text = text;
+    display.done = done;
     display.commentary = collapsible;
     display.level = level;
     display.row.classList.toggle('commentary', collapsible);

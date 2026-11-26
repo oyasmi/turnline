@@ -74,11 +74,11 @@
           <button id="toggle-composer" type="button" class="button round" aria-label="文字输入" title="文字输入" aria-controls="composer" hidden>
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#keyboard"/></svg><span>文字输入</span>
           </button>
-          <button id="interrupt" type="button" class="button round interrupt" aria-label="打断" title="打断" hidden disabled>
-            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#stop"/></svg><span>打断</span>
+          <button id="interrupt" type="button" class="button round interrupt" aria-label="停播" title="停止语音播报" hidden disabled>
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#stop"/></svg><span>停播</span>
           </button>
         </div>
-        <p id="shortcut-hint" class="shortcut-hint" hidden><span id="shortcut-keys"><kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断</span> <span>·</span> <button id="open-shortcuts" type="button" class="shortcut-trigger"><kbd>?</kbd> 快捷键</button></p>
+        <p id="shortcut-hint" class="shortcut-hint" hidden><span id="shortcut-keys"><kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 停播</span> <span>·</span> <button id="open-shortcuts" type="button" class="shortcut-trigger"><kbd>?</kbd> 快捷键</button></p>
       </section>
 
       <section class="transcript" aria-labelledby="transcript-title">
@@ -92,6 +92,14 @@
             <button id="new-session" type="button" class="button ghost"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#plus"/></svg>新对话</button>
           </div>
         </header>
+        <section id="work-status" class="work-status" aria-label="工作进度" hidden>
+          <details>
+            <summary></summary>
+            <ol class="work-activity" hidden></ol>
+            <details class="work-reasoning" hidden><summary>推理摘要</summary><p></p></details>
+          </details>
+          <button id="stop-work" class="button ghost" type="button" hidden>停止工作</button>
+        </section>
         <div class="messages-wrap">
           <div id="messages" class="messages" role="log" aria-label="对话文字" aria-live="off" tabindex="0">
             <div id="empty" class="empty">
@@ -313,7 +321,7 @@
       <dl class="shortcut-list">
         <div><dt><kbd>Space</kbd></dt><dd>按住说话，松开发送</dd></div>
         <div><dt><kbd>M</kbd></dt><dd>静音或取消静音</dd></div>
-        <div><dt><kbd>Esc</kbd></dt><dd>打断回复或关闭弹窗</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>停止播报或关闭弹窗</dd></div>
         <div><dt><kbd>/</kbd></dt><dd>聚焦文字输入</dd></div>
         <div><dt><kbd>Enter</kbd></dt><dd>发送文字（<kbd>Shift</kbd> + <kbd>Enter</kbd> 换行）</dd></div>
         <div><dt><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd></dt><dd>发送文字</dd></div>

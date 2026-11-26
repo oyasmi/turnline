@@ -11,10 +11,11 @@ import { WaitingFeedback } from './waiting.js';
 import { bindConversationHistory, cacheConversationTitle, conversationText, rememberConversation } from './conversation-history.js';
 import { ConversationUpdates, updateSpeech } from './conversation-updates.js';
 import {
-  CALL_INSTRUCTIONS, cancelResponse, checkDirectConnection, createConversation, isBackchannel, isConversationId,
-  listConversationItems, normalizeDirectUrl, openResponse, resumeResponse, updateConversationMetadata,
+  CALL_INSTRUCTIONS, checkDirectConnection, createConversation, isBackchannel, isConversationId,
+  listConversationItems, normalizeDirectUrl, updateConversationMetadata,
 } from './responses.js';
-import { ResponsesSocket } from './responses-ws.js';
+import { WorkRequest } from './work-request.js';
+import { WorkView } from './work-view.js';
 import { splitSpeech } from './chunker.js';
 import { directSettings, preferences, saveDirectSettings, savePreferences, store, stored } from './settings.js';
 import { Transcript } from './transcript.js';
@@ -70,8 +71,8 @@ let conversation;
 let conversationTitled = false;
 let opening;
 let updates;
-let responsesSocket;
-let pendingSteer;
+const workView = new WorkView($('work-status'), $('stop-work'));
+const displayedAnswers = new Map();
 let pendingUpdates = [];
 let call;
 let turn;
@@ -79,7 +80,7 @@ let state = initialCallState;
 let readyModels = false;
 let interruption = '';
 let history = [];
-let voiceQueue = [];
+let workQueue = [];
 let previousCommit;
 let previousOutput;
 let inputTelemetry;
@@ -105,7 +106,7 @@ const waiting = new WaitingFeedback((stage, tool, toolLabel) => {
   showWaiting(stage, tool, toolLabel);
   render();
 }, () => {
-  if (settings.tones && settings.waitingTone && call?.ready && turn?.voice && state.input === 'quiet' &&
+  if (settings.tones && settings.waitingTone && call?.ready && turn?.voice && !turn.speechSuppressed && state.input === 'quiet' &&
       state.connection === 'ready' && !state.muted && !held && !releasing) player.tone('waiting');
 }, () => player.stopTone('waiting'));
 
@@ -167,7 +168,7 @@ function canCall() { return connection === 'ready' || connection === 'demo'; }
 
 function watchConversation(id, cursor) {
   updates?.stop();
-  updates = new ConversationUpdates(settings, id, () => !turn || turn.ended, showConversationUpdate, cursor);
+  updates = new ConversationUpdates(settings, id, () => !turn?.visible || turn.ended, showConversationUpdate, cursor);
 }
 
 function showRestoredConversation(id, page) {
@@ -183,10 +184,12 @@ function showRestoredConversation(id, page) {
       const time = item.created_at == null ? null : new Date(typeof item.created_at === 'number' ? item.created_at * 1000 : item.created_at);
       const row = transcript.add(item.role === 'user' ? 'user' : 'assistant', text, time);
       lastAnswer = item.role === 'assistant' ? row : undefined;
+      if (lastAnswer && item.id) displayedAnswers.set(item.id, row);
     }
   }
   transcript.retryFor(lastAnswer);
   watchConversation(id, page.data.find(item => item?.id && item.status !== 'in_progress')?.id);
+  followWork();
 }
 
 async function restoreConversation(generation) {
@@ -291,13 +294,15 @@ function ensureConversation() {
 function render() {
   renderCall(state, {
     canCall: canCall(), duplex: settings.duplex, pendingPlayback: player.active,
-    busy: Boolean(turn && !turn.ended) || player.active || player.playing || Boolean(replay),
+    canStopSpeaking: canStopSpeaking(),
     holdMode: settings.inputMode === 'hold', held, signal: signalQuality,
     slow: poorSince !== undefined && performance.now() - poorSince >= 3000,
   });
+  workView.render(turn, clock());
 }
 
 function updateDuration() {
+  if (turn?.visible && !turn.ended) workView.render(turn, clock());
   const seconds = call ? Math.floor((clock() - call.started) / 1000) : 0;
   const duration = [Math.floor(seconds / 60), seconds % 60].map(n => String(n).padStart(2, '0')).join(':');
   if ($('duration').textContent !== duration) {
@@ -398,15 +403,13 @@ function hangUp() {
   held = releasing = false;
   signalQuality = poorSince = undefined;
   voice.inCall = false;
-  stopReplay();
+  stopSpeaking(false);
   syncMedia();
-  voiceQueue = [];
   pendingUpdates = [];
   dispatch({ type: 'hangup' });
   ended?.controller.abort();
   clearCaption('draft');
   voice.close();
-  interrupt(false, 'hangup');
   if (ended) {
     trace.stop(clock());
     vibrate(settings.tones);
@@ -441,8 +444,13 @@ function rememberAnswer(current, content) {
   }
 }
 
-function showConversationUpdate(text, speak) {
-  transcript.add('update', text);
+function showConversationUpdate(text, speak, item) {
+  const existing = displayedAnswers.get(item.id);
+  if (existing) {
+    transcript.update(existing, text, false, true);
+    return;
+  }
+  displayedAnswers.set(item.id, transcript.add('update', text));
   if (!speak || !call?.ready) return;
   const summary = updateSpeech(text);
   if (summary) {
@@ -453,30 +461,31 @@ function showConversationUpdate(text, speak) {
 }
 
 function canSteer(text) {
-  return Boolean(
-    turn && !turn.ended && turn.ws && turn.responseId && !turn.firstAudio && !player.playing &&
-    settings.mode === 'relay' && !text.trim().startsWith('/'),
-  );
+  return Boolean(turn?.request?.socket && !turn.ended && !turn.stopping && !turn.steer &&
+    turn.responseId && turn.responseStatus === 'in_progress' && !text.startsWith('/'));
 }
 
 function drainWaiting() {
   if (!canCall() || state.input !== 'quiet') return;
-  if (['connecting', 'reconnecting'].includes(state.connection)) return;
-  if (voiceQueue.length && canSteer(voiceQueue[0].text)) {
-    const queued = voiceQueue.shift();
-    void send(queued.text, queued, queued.display);
+  if (workQueue.length) {
+    const input = workQueue[0];
+    if (!turn || turn.ended) {
+      workQueue.shift();
+      void runWork(input);
+    } else if (canSteer(input.text)) {
+      const requestId = crypto.randomUUID();
+      if (turn.request.steer(input.text, turn.responseId, requestId)) {
+        workQueue.shift();
+        turn.steer = { ...input, requestId, target: turn.responseId, call };
+        stopSpeaking();
+        transcript.delivery(input.display, '正在插话…');
+      }
+    }
     return;
   }
-  if (state.output !== 'idle' || turn && !turn.ended) return;
-  const queued = voiceQueue.shift();
-  if (queued) {
-    void send(queued.text, queued, queued.display);
-    return;
-  }
-  if (!call?.ready || state.muted) return;
+  if (state.output !== 'idle' || turn && !turn.ended || !call?.ready || state.muted || player.active || replay) return;
   const text = pendingUpdates.shift();
   if (text) {
-    turn = undefined;
     dispatch({ type: 'request-started' });
     const group = player.begin();
     player.enqueue(group, { text, speed: settings.rate });
@@ -485,35 +494,25 @@ function drainWaiting() {
   }
 }
 
-function interrupt(note = true, reason = 'interrupted') {
+function canStopSpeaking() {
+  return Boolean(player.active || replay || turn?.voice && !turn.speechSuppressed && !turn.ended);
+}
+
+function stopSpeaking(note = true) {
   stopReplay();
   const previous = turn;
   const position = player.heardPosition;
   const fragment = position?.heard || '';
   const point = position?.entry.range || previous?.lastRange;
-  const completedBeforeInterrupt = previous?.ended;
-  const hadOutput = Boolean(previous && (!previous.ended || player.active));
+  const hadOutput = previous?.playback && player.active;
+  if (previous?.voice) previous.speechSuppressed = true;
+  if (previous) previous.playback = undefined;
   barge.clear();
-  if (previous) {
-    if (!previous.ended) {
-      updates?.interrupted();
-      trace.finish(previous.traceItem, reason, clock() - previous.startedAt);
-      if (previous.ws) responsesSocket?.cancel(previous.responseId);
-      else if (previous.background && previous.responseId) {
-        void cancelResponse(previous.settings, previous.responseId).catch(() => {});
-      }
-    }
-    waiting.stop();
-    previous.ended = true;
-    previous.controller.abort();
-  }
-  pendingSteer = undefined;
-  turn = undefined;
   player.stop();
-  waiting.stop();
-  dispatch({ type: 'playback-ended', waiting: false });
-  if (hadOutput) {
-    if (note && call?.ready) vibrate(settings.tones);
+  player.stopTone('waiting');
+  dispatch({ type: 'playback-ended', waiting: Boolean(call?.ready && previous?.visible && !previous.ended) });
+  if (hadOutput && note) {
+    if (call?.ready) vibrate(settings.tones);
     const display = point?.display ?? previous.answer[0]?.display;
     const at = position?.entry.range ? sourcePosition(point, fragment) : point?.end ?? 0;
     transcript.interrupted(display, at);
@@ -523,19 +522,54 @@ function interrupt(note = true, reason = 'interrupted') {
       if (caption) caption.dataset.interrupted = 'true';
       setTimeout(() => { if (caption?.isConnected) clearCaption('assistant'); }, 1000);
     }
-    if (previous.traceItem && completedBeforeInterrupt) previous.traceItem.playback_interrupted = true;
-    if (previous.voice && note) {
-      const heard = [...previous.heard];
-      if (fragment && fragment !== heard.at(-1)) heard.push(fragment);
-      rememberAnswer(previous, heard.join('\n'));
-      interruption = fragment
-        ? '上一轮语音回复在播到「' + fragment + '」附近时被打断。'
-        : heard.length
-          ? '上一轮语音回复被打断。最后完整播完的一句是「' + heard.at(-1) + '」。'
-          : '上一轮语音回复被打断时，还没有完整播完一句。';
-    }
+    if (previous.traceItem) previous.traceItem.playback_interrupted = true;
+    const heard = [...previous.heard];
+    if (fragment && fragment !== heard.at(-1)) heard.push(fragment);
+    previous.heardBeforeStop = heard.join('\n');
+    if (previous.settings.context !== 'conversation') rememberAnswer(previous, previous.heardBeforeStop);
+    interruption = fragment
+      ? '上一轮语音回复在播到「' + fragment + '」附近时被打断。'
+      : heard.length
+        ? '上一轮语音回复被打断。最后完整播完的一句是「' + heard.at(-1) + '」。'
+        : '上一轮语音回复被打断时，还没有完整播完一句。';
   }
   render();
+}
+
+function stopWork() {
+  const current = turn;
+  if (!current?.visible || current.ended || current.stopping) return;
+  current.stopping = true;
+  for (const queued of workQueue) transcript.delivery(queued.display, '已移出发送队列');
+  workQueue = [];
+  stopSpeaking();
+  if (current.request) current.request.stop();
+  else cancelResult(current, 'cancelled');
+}
+
+function cancelResult(current, result) {
+  if (turn !== current || current.ended) return;
+  if (result === 'cancelled') {
+    if (current.display?.delivery) transcript.delivery(current.display, '已停止工作');
+    updates?.interrupted();
+    finishWork(current, 'cancelled');
+    announce('已停止工作');
+    current.controller.abort();
+  } else {
+    current.request.stopRequested = false;
+    current.stopping = false;
+    showError(result === 'completed' ? '工作已完成，正在接收最终结果。' : '未能确认停工，请稍后重试。');
+  }
+}
+
+function detachWork() {
+  stopSpeaking(false);
+  if (turn && !turn.ended) {
+    trace.finish(turn.traceItem, 'detached', clock() - turn.startedAt);
+    turn.controller.abort();
+  }
+  turn = undefined;
+  waiting.stop();
 }
 
 function metricCount(item, name) {
@@ -550,7 +584,7 @@ function onBarge(event) {
       const preceding = turn?.traceItem;
       trace.metric(preceding, 'bargeStop', clock() - event.at);
       inputTelemetry.stopAt = event.at;
-      interrupt();
+      stopSpeaking();
       // The in-progress interruption is now an ordinary user utterance.
       dispatch({ type: 'speech-start', input: state.inputId, duringPlayback: false });
       break;
@@ -713,8 +747,23 @@ function onVoice(event) {
       matchesEcho(text, telemetry.references) || matchesEcho(text, player.echoReferences) ||
       matchesEcho(text, previousOutput?.references)
     );
-    if (!text || isBackchannel(text) || echo) {
+    if (!text || echo) {
       clearCaption('draft');
+      return;
+    }
+    if (turn?.visible && !turn.ended &&
+        /^(?:取消|停工|停止工作|取消(?:当前)?任务|stop (?:the )?(?:work|task)|cancel(?: the)? task)[。！!.\s]*$/iu.test(text)) {
+      clearCaption('draft');
+      stopWork();
+      return;
+    }
+    if (isBackchannel(text)) {
+      clearCaption('draft');
+      return;
+    }
+    if ((telemetry.stopAt || canStopSpeaking()) && /^(?:停|等|等等|别说|停播|stop|no)[。！!.\s]*$/iu.test(text)) {
+      clearCaption('draft');
+      stopSpeaking();
       return;
     }
     if (previousCommit && telemetry.onset - previousCommit.endpointAt < 1500 && !telemetry.stopAt) {
@@ -734,8 +783,7 @@ function onVoice(event) {
     announce('已发送：' + text);
     vibrate(settings.tones);
     if (settings.tones) player.tone('commit');
-    voiceQueue.push(timing);
-    drainWaiting();
+    send(text, timing, timing.display);
   }
 }
 
@@ -764,7 +812,7 @@ function speechEntry(phrase, range) {
 }
 
 function enqueue(current, phrase, range, firstTextAt) {
-  if (!current.voice || !call?.ready || current.controller.signal.aborted) return;
+  if (!current.playback || !call?.ready || current.controller.signal.aborted) return;
   if (current.firstSpeakable === undefined) {
     current.firstSpeakable = clock();
     waiting.stop();
@@ -801,51 +849,97 @@ function enqueue(current, phrase, range, firstTextAt) {
   if (shouldRender) render();
 }
 
-function ensureResponsesSocket() {
-  if (settings.mode !== 'relay' || settings.context !== 'conversation' || !('WebSocket' in window)) return undefined;
-  if (!responsesSocket || responsesSocket.url !== settings.url) {
-    responsesSocket?.close();
-    responsesSocket = new ResponsesSocket(settings.url, { onAuthRequired: handleAuthRequired });
-  }
-  return responsesSocket;
-}
-
 function shortTitle(text) {
   const chars = Array.from(text.replace(/\s+/gu, ' ').trim());
   return chars.length > 60 ? chars.slice(0, 60).join('') + '…' : chars.join('');
 }
 
-async function send(text, timing, display, quiet = false) {
-  if (!canCall() || !text.trim()) return;
-  if (text.length > 12000) {
-    showError('这条消息过长，请分段发送。');
+function send(text, timing, display, quiet = false) {
+  text = text.trim();
+  if (!canCall() || !text) return;
+  if (text.length > 12_000 || workQueue.length >= 5) {
+    showError(text.length > 12_000 ? '这条消息过长，请分段发送。' : '消息队列已满，请稍后再发。');
+    transcript.delivery(display, '未发送');
     return;
   }
-  // Mid-turn steering over WebSocket: when the assistant is still thinking or
-  // running tools (not yet speaking), steer the running turn instead of
-  // aborting its progress.
-  if (canSteer(text) && responsesSocket?.steer(text, turn.responseId)) {
-    if (!display) transcript.add('user', text);
-    pendingSteer = { text, timing, quiet };
+  display ??= transcript.add('user', text);
+  workQueue.push({ text, timing, display, quiet });
+  if (turn && !turn.ended) transcript.delivery(display, turn.stopping ? '等待停工确认' : '等待提交…');
+  drainWaiting();
+}
+
+function followWork() {
+  if (settings.mode === 'relay' && conversation && (!turn || turn.ended)) void runWork();
+}
+
+function finishWork(current, outcome) {
+  if (current.ended) return;
+  current.ended = true;
+  current.outcome = outcome;
+  current.finishedAt = clock();
+  current.activity.finish(Math.max(current.finishedAt, current.activityClock ?? 0));
+  trace.finish(current.traceItem, outcome, current.finishedAt - current.startedAt);
+  if (turn !== current) return;
+  waiting.stop();
+  workView.changed();
+  if (current.playback) player.seal(current.playback);
+  else dispatch({ type: 'playback-ended', waiting: false });
+  if (current.steer && !current.steer.accepted) {
+    transcript.delivery(current.steer.display, outcome === 'cancelled' ? '已停止工作' : '插话结果待确认');
+  }
+  render();
+  queueMicrotask(drainWaiting);
+}
+
+function enableSpeech(current, quiet) {
+  current.voice = Boolean(call?.ready && readyModels && !quiet);
+  current.speechSuppressed = false;
+  if (current.voice) current.playback = player.begin();
+}
+
+function handleSteer(current, event) {
+  const steer = current.steer;
+  if (!steer || event.turnline_request_id !== steer.requestId) return;
+  if (event.type === 'response.steer.accepted') {
+    steer.accepted = true;
+    transcript.delivery(steer.display, '已插入正在进行的工作');
+    if (current.responseId !== steer.target) current.steer = undefined;
     return;
   }
-  interrupt();
-  showError();
-  for (const name of Object.keys(metrics)) {
-    if (name !== 'interruption') showMetric(name, name === 'asr' ? timing?.asrMs : undefined);
+  current.steer = undefined;
+  const code = event.error?.code;
+  if (!current.stopping && ['response_already_completed', 'response_not_active'].includes(code)) {
+    current.responseStatus = 'finishing';
+    workQueue.unshift(steer);
+    transcript.delivery(steer.display, '等待当前回合结束');
+  } else {
+    transcript.delivery(steer.display, '插话未提交 · 可重新发送');
   }
-  if (!display) transcript.add('user', text);
-  history.push({ role: 'user', content: text });
-  if (history.length > 16) history.splice(0, history.length - 16);
+}
+
+async function runWork(input) {
+  const { text, timing, display, quiet } = input ?? {};
+  if (input) {
+    stopSpeaking();
+    showError();
+    transcript.delivery(display, '正在提交…');
+    for (const name of Object.keys(metrics)) {
+      if (name !== 'interruption') showMetric(name, name === 'asr' ? timing?.asrMs : undefined);
+    }
+    history.push({ role: 'user', content: text });
+    if (history.length > 16) history.splice(0, history.length - 16);
+    transcript.retryFor(undefined);
+  }
   const startedAt = clock();
-  transcript.retryFor(undefined);
   const current = new ResponseTurn({
-    startedAt, traceItem: trace.begin(startedAt, timing ? 'voice' : 'text'), settings, timing,
-    voice: Boolean(call?.ready && readyModels && !quiet),
+    display, startedAt, traceItem: input && trace.begin(startedAt, timing ? 'voice' : 'text'),
+    settings, timing, visible: Boolean(input),
   }, {
     metric: (name, value) => setMetric(current, name, value),
     text(entry) {
-      entry.display ??= transcript.add('assistant');
+      entry.display ??= displayedAnswers.get(entry.id) ?? transcript.add('assistant');
+      if (entry.id) displayedAnswers.set(entry.id, entry.display);
+      if (!entry.done && entry.display.done) return;
       transcript.update(entry.display, entry.text, entry.phase === 'commentary', entry.done, {
         level: entry.level, keepExpanded: entry.spokenAsCommentary,
       });
@@ -853,152 +947,149 @@ async function send(text, timing, display, quiet = false) {
     track: id => updates?.track(id),
     enqueue: (phrase, range, at) => enqueue(current, phrase, range, at),
     tool: (active, label) => waiting.update(undefined, active, label),
+    activity: () => {
+      workView.changed();
+      workView.render(current, clock());
+    },
     notice: (level, message) => transcript.notice(level, message),
     usage: value => trace.usage(current.traceItem, value),
   });
   turn = current;
-  if (current.voice) current.playback = player.begin();
-  if (timing) {
-    setMetric(current, 'asr', timing.asrMs);
-    setMetric(current, 'silenceWait', timing.silenceWaitMs);
-    setMetric(current, 'partialLag', timing.partialLag);
-    timing.traceItem = current.traceItem;
-    if (timing.cut && current.traceItem) current.traceItem.cut = true;
+  if (input) {
+    enableSpeech(current, quiet);
+    if (timing) {
+      setMetric(current, 'asr', timing.asrMs);
+      setMetric(current, 'silenceWait', timing.silenceWaitMs);
+      setMetric(current, 'partialLag', timing.partialLag);
+      timing.traceItem = current.traceItem;
+      if (timing.cut && current.traceItem) current.traceItem.cut = true;
+    }
+    dispatch({ type: 'request-started' });
+    waiting.start();
+    setMetric(current, 'feedback', clock() - (timing?.endpointAt ?? startedAt));
   }
-  dispatch({ type: 'request-started' });
-  waiting.start();
-  setMetric(current, 'feedback', clock() - (timing?.endpointAt ?? startedAt));
-  const previousInterruption = interruption;
-  interruption = '';
+  const previousInterruption = input ? interruption : undefined;
+  if (input) interruption = '';
   const { signal } = current.controller;
-  render();
-  let steerFallback;
+  let outcome;
   try {
-    if (current.settings.context === 'conversation') await ensureConversation();
+    const id = current.settings.context === 'conversation' ? await ensureConversation() : undefined;
     if (signal.aborted) return;
-    if (conversation && !conversationTitled && !text.trim().startsWith('/')) {
+    if (input && id && !conversationTitled && !text.startsWith('/')) {
       conversationTitled = true;
       const title = shortTitle(text);
-      cacheConversationTitle(conversation, title);
-      void updateConversationMetadata(current.settings, conversation, { source: 'turnline', title }).catch(() => {});
+      cacheConversationTitle(id, title);
+      void updateConversationMetadata(current.settings, id, { source: 'turnline', title }).catch(() => {});
     }
     current.sentAt = clock();
     if (timing) setMetric(current, 'endpointToRequest', current.sentAt - timing.endpointAt);
-
     const instructions = current.voice
       ? [CALL_INSTRUCTIONS, current.settings.instructions, previousInterruption].filter(Boolean).join('\n')
       : undefined;
+    current.request = new WorkRequest(current.settings, id, current.controller, result => cancelResult(current, result));
+    if (input) render();
 
-    const consume = async events => {
-      for await (const event of events) {
-        if (signal.aborted || turn !== current) return 'aborted';
-        if (event.type === 'response.steer.accepted') continue;
-        if (event.type === 'response.steer.failed') {
-          if (pendingSteer) {
-            steerFallback = pendingSteer;
-            pendingSteer = undefined;
-          }
-          continue;
-        }
-        if (event.type === 'response.created' && current.steered) {
-          pendingSteer = undefined;
-        }
-        if (current.event(event)) return 'completed';
+    const payload = input && { text, instructions, messages: history.slice(-16), voice: current.voice, interruption: previousInterruption };
+    for await (const event of current.request.events(payload)) {
+      if (signal.aborted || turn !== current) return;
+      if (event.type === 'turnline.idle') break;
+      if (event.type === 'turnline.attached') {
+        if (Number.isFinite(event.elapsed_ms)) current.workStartedAt = clock() - event.elapsed_ms;
+        continue;
       }
-      return 'disconnected';
-    };
-
-    let outcome = 'disconnected';
-    const socket = ensureResponsesSocket();
-    if (socket && conversation) {
-      try {
-        current.ws = true;
-        const wsPayload = {
-          model: current.settings.model,
-          conversation,
-          input: text,
-          ...(instructions ? { instructions } : {}),
-        };
-        outcome = await consume(socket.create(wsPayload, signal));
-      } catch (error) {
-        if (signal.aborted || current.responseId) throw error;
-        current.ws = false;
-        socket.close();
+      if (!current.visible) {
+        current.visible = true;
+        render();
       }
-    }
-
-    if (!current.ws) {
-      const useBackground = current.settings.context === 'conversation' && Boolean(conversation);
-      current.background = useBackground;
-      const openInitial = () => openResponse(current.settings, {
-        conversation, messages: history.slice(-16), text, voice: current.voice,
-        interruption: previousInterruption, background: useBackground,
-      }, signal);
-      try {
-        outcome = await consume(await openInitial());
-      } catch (error) {
-        if (signal.aborted || !useBackground || !current.responseId || current.lastSequence === undefined || error.status) {
-          throw error;
+      if (event.type === 'turnline.snapshot') {
+        stopSpeaking(false);
+        current.advance();
+        current.responseId = event.response_id;
+        current.responseStatus = event.status;
+        current.replayGap = true;
+        render();
+        drainWaiting();
+      } else if (event.type === 'response.steer.accepted' || event.type === 'response.steer.failed') {
+        handleSteer(current, event);
+      } else if (event.type === 'turnline.cancel_failed') {
+        current.request.stopRequested = false;
+        current.stopping = false;
+        showError(event.message);
+      } else if (event.type === 'response.cancelled') {
+        cancelResult(current, 'cancelled');
+        return;
+      } else {
+        // Pipiclaw sends a sequenced error immediately before response.failed.
+        if (current.request.socket && event.type === 'error' && event.sequence_number !== undefined) continue;
+        if (event.type === 'response.created') transcript.delivery(display);
+        if (event.turnline_continues ||
+            event.type === 'response.incomplete' && event.response?.incomplete_details?.reason === 'steered') {
+          if (!current.speechSuppressed && canStopSpeaking()) stopSpeaking();
+        }
+        if (event.type === 'response.created' && current.steer &&
+            event.response?.id !== current.steer.target) {
+          const steer = current.steer;
+          if (steer.accepted) current.steer = undefined;
+          if (!current.stopping && steer.call === call) enableSpeech(current, steer.quiet);
+        }
+        if (current.event(event)) {
+          outcome = 'completed';
+          break;
         }
       }
-      if (outcome === 'disconnected' && useBackground && !signal.aborted &&
-          current.responseId && current.lastSequence !== undefined) {
-        for (const delayMs of [600, 1500, 3000]) {
-          if (signal.aborted || turn !== current) break;
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-          if (signal.aborted || turn !== current) break;
-          try {
-            const resumed = await resumeResponse(current.settings, current.responseId, current.lastSequence, signal);
-            outcome = await consume(resumed);
-            if (outcome !== 'disconnected') break;
-          } catch (error) {
-            if (signal.aborted || error.status === 400 || error.status === 404) break;
-          }
-        }
+      if (['response.created', 'response.queued', 'response.in_progress', 'response.steer.accepted'].includes(event.type)) {
+        render();
+        drainWaiting();
       }
     }
-
-    if (outcome === 'aborted') return;
-    if (outcome !== 'completed') throw new Error('回复提前断开。可查看已有文字或发送下一条。');
-    const answers = current.answer;
-    const answer = answers.map(entry => entry.text).join('\n');
-    transcript.retryFor(answers.at(-1)?.display);
-    rememberAnswer(current, answer);
-    expectingAnswer = /[？?][”’」』"]?\s*$/u.test(answer);
-    configureVoice();
-    trace.finish(current.traceItem, 'completed', clock() - current.startedAt);
+    if (signal.aborted) return;
+    if (outcome === 'completed') {
+      const answers = current.answer;
+      const answer = answers.map(entry => entry.text).join('\n');
+      transcript.retryFor(answers.at(-1)?.display);
+      if (input) {
+        transcript.delivery(display);
+        rememberAnswer(current, current.settings.context === 'conversation' ? answer : current.heardBeforeStop ?? answer);
+      }
+      const steer = current.steer;
+      if (steer && !steer.accepted && !current.stopping && current.responseId === steer.target) {
+        // A final event for the original response proves the bridge did not accept this steer.
+        current.steer = undefined;
+        workQueue.unshift(steer);
+      }
+      expectingAnswer = /[？?][”’」』"]?\s*$/u.test(answer);
+      configureVoice();
+    } else if (current.visible) {
+      throw new Error('工作连接已断开，请在会话记录中查看后续结果。');
+    }
   } catch (error) {
-    if (!signal.aborted) {
-      updates?.interrupted();
-      showError(error.message);
-      trace.finish(current.traceItem, 'failed', clock() - current.startedAt);
-      if (error.status === 401) {
-        hangUp();
-        newSession({ forget: false });
-        if (directMode) {
-          saveDirectSettings(settings.url, '');
-          settings = { ...settings, key: '' };
-          connection = 'setup';
-          connectionDetail = directFailure(error);
-          renderConnection();
-        } else if (authMode === 'passcode') {
-          handleAuthRequired();
-        } else {
-          showError('正在刷新浏览器会话，请稍后重新发送。');
-          void refreshConnection();
-        }
+    if (signal.aborted) return;
+    outcome = 'failed';
+    updates?.interrupted();
+    if (input || current.visible || error.status === 401) showError(error.message);
+    if (error.code === 'work_active' || error.code === 'work_limit') {
+      transcript.delivery(display, '未提交 · 可重新发送');
+    } else if (display?.delivery) {
+      transcript.delivery(display, '提交结果待确认');
+    }
+    if (error.status === 401) {
+      hangUp();
+      newSession({ forget: false });
+      if (directMode) {
+        saveDirectSettings(settings.url, '');
+        settings = { ...settings, key: '' };
+        connection = 'setup';
+        connectionDetail = directFailure(error);
+        renderConnection();
+      } else if (authMode === 'passcode') {
+        handleAuthRequired();
+      } else {
+        void refreshConnection();
       }
     }
   } finally {
-    current.ended = true;
-    if (turn === current) {
-      waiting.stop();
-      if (current.playback) player.seal(current.playback);
-      else dispatch({ type: 'playback-ended', waiting: false });
-    }
-  }
-  if (steerFallback && !signal.aborted) {
-    void send(steerFallback.text, steerFallback.timing, true, steerFallback.quiet);
+    finishWork(current, current.visible ? outcome ?? 'failed' : undefined);
+    if (turn === current && !current.visible) turn = undefined;
   }
 }
 
@@ -1013,13 +1104,14 @@ function newSession({ forget = true } = {}) {
   updates?.stop();
   updates = undefined;
   pendingUpdates = [];
-  voiceQueue = [];
+  workQueue = [];
   previousCommit = previousOutput = undefined;
   expectingAnswer = false;
   held = releasing = false;
   configureVoice();
   clearInput();
-  interrupt(false, 'new_conversation');
+  detachWork();
+  displayedAnswers.clear();
   history = [];
   conversation = undefined;
   conversationTitled = false;
@@ -1047,7 +1139,6 @@ function openAuthDialog(detail) {
 function handleAuthRequired(detail = '会话已失效，请重新输入访问口令。') {
   authMode = 'passcode';
   hangUp();
-  responsesSocket?.close();
   newSession({ forget: false });
   connection = 'locked';
   connectionDetail = detail;
@@ -1225,7 +1316,7 @@ function toggleMute() {
 
 function startHold() {
   if (state.connection !== 'ready' || state.muted || held || releasing) return false;
-  if (state.output !== 'idle' || player.active || turn && !turn.ended) interrupt();
+  if (canStopSpeaking()) stopSpeaking();
   player.stopTone('waiting');
   held = true;
   configureVoice();
@@ -1279,7 +1370,7 @@ function stopReplay() {
 function replayMessage(display) {
   const { phrases, ranges } = splitSpeech(display.text, true, true, true);
   if (!phrases.length) return;
-  interrupt(true, 'replay');
+  stopSpeaking();
   showError();
   const play = output => {
     const group = output.begin();
@@ -1337,14 +1428,15 @@ $('call').onclick = () => {
 };
 $('allow-microphone').onclick = () => void startCall();
 $('mute').onclick = toggleMute;
-$('interrupt').onclick = () => interrupt();
+$('interrupt').onclick = () => stopSpeaking();
+$('stop-work').onclick = stopWork;
 $('orb').onclick = () => {
   if (!call) {
     $('call').click();
     return;
   }
   if (settings.inputMode === 'hold' && !state.muted) return;
-  if (callPhase(state) === 'speaking') interrupt();
+  if (callPhase(state) === 'speaking') stopSpeaking();
   else voice.send({ type: 'force-commit' });
 };
 $('mode-badge').onclick = () => {
@@ -1430,7 +1522,7 @@ bindShortcuts($('orb'), field, {
   escape() {
     if (held) releaseHold(false);
     else if ($('expand-transcript').getAttribute('aria-expanded') === 'true') expandTranscript(false);
-    else if (callPhase(state) !== 'idle' || replay) interrupt();
+    else if (canStopSpeaking()) stopSpeaking();
   },
 });
 document.addEventListener('visibilitychange', prewarmVoice);
@@ -1446,8 +1538,12 @@ $('composer').onsubmit = event => {
 if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 setInterval(updateDuration, 250);
 window.addEventListener('pagehide', () => {
-  responsesSocket?.close();
   hangUp();
+  detachWork();
+  workQueue = [];
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted) followWork();
 });
 trace.save();
 if (directMode) $('home').href = '/direct';

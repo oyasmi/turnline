@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 BODY_LIMIT = 128 * 1024
+WS_AUTH_CLOSE_CODE = 4401
 
 
 def error(message, status=400):

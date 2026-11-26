@@ -95,6 +95,16 @@ a.button { text-decoration: none; }
 .transcript .panel-heading { padding: 11px 18px 11px 22px; border-bottom: 1px solid var(--soft-line); }
 .transcript h2 { display: flex; align-items: center; gap: 9px; }
 .transcript h2 .icon { color: var(--quiet); }
+.work-status { display: flex; align-items: flex-start; padding: 4px 12px; gap: 8px; border-bottom: 1px solid var(--soft-line); font-size: 13px; }
+.work-status > details { flex: 1; min-width: 0; }
+.work-status summary { cursor: pointer; color: var(--muted); padding: 8px 0; overflow-wrap: anywhere; }
+.work-status > details > summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.work-status > details[open] > summary { white-space: normal; }
+.work-status #stop-work { color: var(--bad); }
+.work-activity, .work-reasoning p { margin-block: 0 8px; max-height: min(23dvh, 190px); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+.work-activity li { padding-block: 3px; }
+.work-activity small { display: block; color: var(--muted); }
+.entry .delivery { color: var(--muted); font-size: 11px; }
 .messages-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .messages { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 22px clamp(18px, 3vw, 46px); scrollbar-width: thin; }
 .messages:focus-visible { outline-offset: -3px; }

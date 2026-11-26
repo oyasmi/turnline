@@ -231,7 +231,9 @@ def create_app(
     slot = SpeechSlot()
     synthesis = SynthesisQueue(models, slot)
     recognition = RecognitionQueue(models, slot)
-    sessions = None if demo_mode else SessionStore(state_dir or default_state())
+    sessions = None if demo_mode else SessionStore(
+        state_dir or default_state(), share_authenticated=auth_mode == "passcode",
+    )
     pipiclaw = None if demo_mode or direct_only else Pipiclaw(socket_path or default_socket(), sessions)
     auth = AuthGate(
         mode=auth_mode, verifier=passcode_verifier, sessions=sessions,
@@ -253,7 +255,7 @@ def create_app(
             yield
         finally:
             if pipiclaw:
-                await pipiclaw.client.aclose()
+                await pipiclaw.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
     app.add_middleware(BrowserBoundary, demo_mode=demo_mode, hsts=hsts)
@@ -413,9 +415,12 @@ def create_app(
         @app.websocket("/api/pipiclaw/v1/responses")
         async def responses_ws(ws: WebSocket):
             cookie, _ = session_cookie(ws)
-            identity = await asyncio.to_thread(
-                sessions.identity, ws.cookies.get(cookie), require_auth=auth.enabled,
-            )
+            async def authorize():
+                return await asyncio.to_thread(
+                    sessions.identity, ws.cookies.get(cookie), require_auth=auth.enabled,
+                )
+
+            identity = await authorize()
             if not identity:
                 if auth.enabled:
                     await reject_ws(ws, WS_AUTH_CLOSE_CODE)
@@ -426,7 +431,7 @@ def create_app(
                 if not acquired:
                     await reject_ws(ws, WS_LIMIT_CLOSE_CODE)
                     return
-                await pipiclaw.responses_ws(ws, identity)
+                await pipiclaw.responses_ws(ws, identity, authorize)
 
     if demo_mode:
         app.add_api_route("/demo/v1/responses", demo, methods=["POST"])

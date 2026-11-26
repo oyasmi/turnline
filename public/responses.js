@@ -179,10 +179,6 @@ export async function resumeResponse(settings, responseId, startingAfter, signal
 
 export async function cancelResponse(settings, responseId, signal) {
   if (!responseId) return;
-  try {
-    await request(settings, '/responses/' + encodeURIComponent(responseId) + '/cancel', {}, signal);
-  } catch (error) {
-    if (error.status === 404 || error.status === 400) return;
-    throw error;
-  }
+  const response = await request(settings, '/responses/' + encodeURIComponent(responseId) + '/cancel', {}, signal);
+  return response.json();
 }

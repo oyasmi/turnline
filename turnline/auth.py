@@ -14,6 +14,7 @@ from tempfile import NamedTemporaryFile
 from time import monotonic, time
 
 from .connection import loopback
+from .http_support import WS_AUTH_CLOSE_CODE
 
 MIN_PASSCODE_LENGTH = 8
 MAX_PASSCODE_LENGTH = 128
@@ -25,7 +26,6 @@ SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_DKLEN = 32
 
-WS_AUTH_CLOSE_CODE = 4401
 WS_LIMIT_CLOSE_CODE = 4429
 MAX_VOICE_SOCKETS = 4
 MAX_RESPONSES_SOCKETS = 8

@@ -58,7 +58,7 @@ export class ConversationUpdates {
         if (this.foreground.delete(item.id)) continue;
         if (item.type !== 'message' || item.role !== 'assistant' || item.status !== 'completed' || item.phase !== 'final_answer') continue;
         const text = item.content.filter(part => part.type === 'output_text').map(part => part.text).join('\n').trim();
-        if (text) this.onMessage(text, !this.uncertain);
+        if (text) this.onMessage(text, !this.uncertain, item);
       }
       if (page.has_more && page.data.length) {
         delay = 0;

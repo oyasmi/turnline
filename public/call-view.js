@@ -11,7 +11,7 @@ export function setIcon(element, name) {
   element.querySelector('use')?.setAttribute('href', '/assets/icons.svg#' + name);
 }
 
-export function renderCall(state, { canCall, duplex, pendingPlayback, busy, holdMode, held, signal, slow }) {
+export function renderCall(state, { canCall, duplex, pendingPlayback, canStopSpeaking, holdMode, held, signal, slow }) {
   const phase = callPhase(state);
   const connected = state.connection === 'ready';
   const active = state.connection !== 'idle';
@@ -24,7 +24,7 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
     pausing: ['等你继续说', '点光球可以立即发送。'],
     thinking: [tool ? (toolLabel || '正在查询') : pendingPlayback ? '正在合成' : waiting >= 2 ? '正在思考' : '等待回复',
       tool ? '正在等待 PipiClaw 工具返回。' : '回复也会显示在对话记录里。'],
-    speaking: ['正在播报', duplex && !state.muted ? '你可以直接开口插话。' : '点光球或「打断」即可继续说。'],
+    speaking: ['正在播报', duplex && !state.muted ? '你可以直接开口插话。' : '点光球或「停播」即可继续说。'],
   }[phase];
   if (held && connected && !state.muted) [label, hint] = ['正在听你说', '松开发送语音。'];
   if (state.congested && connected) hint = '网络较慢，正在补传麦克风音频。';
@@ -66,12 +66,12 @@ export function renderCall(state, { canCall, duplex, pendingPlayback, busy, hold
   mute.hidden = !active;
   mute.disabled = !connected;
   $('toggle-composer').hidden = !active;
-  $('interrupt').hidden = !active && !busy;
-  $('interrupt').disabled = !busy;
+  $('interrupt').hidden = !active && !canStopSpeaking;
+  $('interrupt').disabled = !canStopSpeaking;
   $('shortcut-hint').hidden = !active;
   $('shortcut-keys').innerHTML = holdMode
-    ? '<kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断'
-    : '<kbd>Space</kbd> 按住插话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 打断';
+    ? '<kbd>Space</kbd> 按住说话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 停播'
+    : '<kbd>Space</kbd> 按住插话 <span>·</span> <kbd>M</kbd> 静音 <span>·</span> <kbd>Esc</kbd> 停播';
   const indicator = $('signal');
   indicator.hidden = !active || !signal;
   if (signal) {

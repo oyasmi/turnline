@@ -166,6 +166,11 @@ try {
     await page.getByRole('textbox', { name: '文字消息' }).fill(text);
     await page.getByRole('button', { name: '发送', exact: true }).click();
   };
+  const newConversation = async () => {
+    await page.getByRole('button', { name: '新对话' }).click();
+    const confirm = page.getByRole('button', { name: '确认清空？' });
+    if (await confirm.isVisible()) await confirm.click();
+  };
   const configure = async (reading, duplex, minVoiceSeconds) => {
     await page.getByRole('button', { name: '通话设置' }).click();
     await page.locator('#reading').selectOption(reading);
@@ -203,11 +208,11 @@ try {
   await waitForText('#status', /准备通话/);
   await sendText('说慢一点');
   await waitForText('.entry.assistant:last-child', /打断测试/);
-  await page.getByRole('button', { name: '打断', exact: true }).click();
-  assert.equal(await page.locator('.entry.assistant:last-child').getAttribute('data-interrupted'), 'true');
-  await page.getByRole('button', { name: '新对话' }).click();
+  await page.getByRole('button', { name: '停止工作', exact: true }).click();
+  await waitForText('#work-status > details > summary', /已停止工作/);
+  await newConversation();
   assert.equal(await page.locator('.entry').count(), 0);
-  console.log('Responses SSE, history, new conversation, and manual interruption passed.');
+  console.log('Responses SSE, history, new conversation, and explicit cancellation passed.');
 
   await page.evaluate(() => window.prepareTestSpeech());
   await page.evaluate(() => window.prepareTestSpeech('嗯，对。'));
@@ -376,7 +381,7 @@ try {
   }
   assert.equal(await page.locator('.entry.commentary').count(), 2);
 
-  await page.getByRole('button', { name: '新对话' }).click();
+  await newConversation();
   // Hold the second phrase while the first plays. Interrupt after SSE completion
   // to catch a full UI transcript leaking into the next model request.
   holdRest = true;
@@ -385,7 +390,7 @@ try {
     await sendText('你好');
     await waitForText('.entry.assistant:last-child .content', /你接着说/);
     await page.waitForFunction(count => window.testPlayback.filter(event => event.type === 'played').length > count, beforePlayed);
-    await page.getByRole('button', { name: '打断', exact: true }).click();
+    await page.getByRole('button', { name: '停播', exact: true }).click();
   } finally {
     holdRest = false;
   }
@@ -399,7 +404,7 @@ try {
   ]);
   assert.match(followup.instructions, /最后完整播完的一句是「你好，我在听。」/);
   assert.match(followup.instructions, /正在和用户实时通话/);
-  await page.getByRole('button', { name: '新对话' }).click();
+  await newConversation();
 
   const echoInjected = page.evaluate(() => window.injectEcho(0));
   await sendText('说慢一点');
@@ -448,7 +453,7 @@ try {
       await waitPlayback('audible', beforeAudio);
       await page.evaluate(() => window.speakTestUtterance());
       await page.waitForFunction(count => document.querySelectorAll('.entry.user:not(.draft)').length === count, before + 2);
-      const stopReply = page.getByRole('button', { name: '打断', exact: true });
+      const stopReply = page.getByRole('button', { name: '停播', exact: true });
       if (await stopReply.isEnabled()) await stopReply.click();
       await waitForText('#status', /正在聆听/);
       timings.push(await page.evaluate(() => {
@@ -518,6 +523,10 @@ try {
       await route.fulfill({ json: { id: fixtureConversation } });
       return;
     }
+    if (!pathname.endsWith('/responses')) {
+      await route.fulfill({ json: { id: fixtureConversation, metadata: request.postDataJSON()?.metadata } });
+      return;
+    }
     const body = request.postDataJSON();
     requests.push(body);
     const key = requests.length;
@@ -532,7 +541,7 @@ try {
     ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('') });
   });
   await page.reload();
-  await waitForText('#backend-label', /Pipiclaw 已连接/);
+  await waitForText('#backend-label', /PipiClaw 已连接/);
   await page.getByRole('button', { name: '通话设置' }).click();
   await page.locator('#instructions').fill('每次只说一个步骤。');
   await page.getByRole('button', { name: '保存设置' }).click();
@@ -577,7 +586,7 @@ try {
   assert.match(requests[3].input, /今天天气/);
   await page.getByRole('button', { name: '挂断' }).click();
   await page.reload();
-  await waitForText('#backend-label', /Pipiclaw 已连接/);
+  await waitForText('#backend-label', /PipiClaw 已连接/);
   await waitForText('.entry.assistant .content', /已收到/);
   await page.getByRole('button', { name: '通话诊断' }).click();
   const [report] = await Promise.all([

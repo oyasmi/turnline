@@ -17,7 +17,9 @@ function reply(text = conversation.content[0].text) {
   ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('');
 }
 
-async function fixture(page, respond = route => route.fulfill({ contentType: 'text/event-stream', body: reply() })) {
+const respondWithExample = route => route.fulfill({ contentType: 'text/event-stream', body: reply() });
+
+async function fixture(page, respond = respondWithExample, mode = 'demo') {
   await page.addInitScript(() => {
     navigator.mediaDevices.getUserMedia = async () => {
       const input = new AudioContext();
@@ -59,7 +61,7 @@ async function fixture(page, respond = route => route.fulfill({ contentType: 'te
   });
   await page.route('**/demo/v1/responses', respond);
   await page.goto('/');
-  await expect(page.locator('#backend-label')).toHaveText('离线演示');
+  await expect(page.locator('#backend-label')).toHaveText(mode === 'demo' ? '离线演示' : 'PipiClaw 已连接');
   return {
     get frames() { return binaryFrames; },
     binary(data) { socket.send(data); },
@@ -80,6 +82,23 @@ async function startCall(page) {
 async function send(page, content) {
   await page.getByRole('textbox', { name: '文字消息' }).fill(content);
   await page.getByRole('button', { name: '发送', exact: true }).click();
+}
+
+function playSpeech(voice, say) {
+  const { seq, turn } = say;
+  voice.send('say-start', { seq, turn, rate: 16000, timing: { queue: 0, synthesis: 0 } });
+  const samples = 16000 * 3;
+  // A valid synthesis packet drives the real AudioWorklet, including its playback head.
+  const pcm = Buffer.alloc(samples * 2 + 7);
+  pcm.writeUInt32BE(turn);
+  pcm.writeUInt16BE(seq, 4);
+  pcm[6] = 1;
+  for (let index = 0; index < samples; index++) {
+    pcm.writeInt16LE(Math.round(1000 * Math.sin(index * .12)), 7 + index * 2);
+  }
+  voice.binary(pcm);
+  voice.send('say-done', { seq, turn, samples, textMap: { start: 0, end: samples } });
+  return turn;
 }
 
 for (const [width, height] of [[1440, 900], [1280, 720], [390, 844], [360, 640]]) {
@@ -144,26 +163,13 @@ test('safe Markdown, waiting audio, playback range and interruption', async ({ p
   await expect(page.locator('.entry.assistant script')).toHaveCount(0);
   await expect(page.getByRole('link', { name: '帮助' })).toHaveAttribute('rel', 'noopener noreferrer');
   await expect.poll(() => voice.requests.filter(event => event.type === 'say').length).toBeGreaterThan(0);
-  const say = voice.requests.find(event => event.type === 'say');
-  const { seq, turn } = say;
-  voice.send('say-start', { seq, turn, rate: 16000, timing: { queue: 0, synthesis: 0 } });
-  const samples = 16000 * 3;
-  // A valid synthesis packet drives the real AudioWorklet, including its playback head.
-  const pcm = Buffer.alloc(samples * 2 + 7);
-  pcm.writeUInt32BE(turn);
-  pcm.writeUInt16BE(seq, 4);
-  pcm[6] = 1;
-  for (let index = 0; index < samples; index++) {
-    pcm.writeInt16LE(Math.round(1000 * Math.sin(index * .12)), 7 + index * 2);
-  }
-  voice.binary(pcm);
-  voice.send('say-done', { seq, turn, samples, textMap: { start: 0, end: samples } });
+  const turn = playSpeech(voice, voice.requests.find(event => event.type === 'say'));
   await expect(page.locator('#status')).toHaveText('正在播报');
   await expect.poll(() => page.evaluate(() => CSS.highlights.has('spoken'))).toBeTruthy();
   await expect(page.locator('#stage-caption')).toContainText('第一句');
   await expect(page.locator('#stage-caption')).not.toContainText('**');
   await page.waitForTimeout(600);
-  await page.getByRole('button', { name: '打断', exact: true }).click();
+  await page.getByRole('button', { name: '停播', exact: true }).click();
   await expect(page.locator('.entry.assistant .flag')).toHaveText('在此打断');
   await expect(page.locator('.entry.assistant .unheard').first()).toBeVisible();
   expect(await page.evaluate(() => CSS.highlights.has('spoken'))).toBe(false);
@@ -171,8 +177,119 @@ test('safe Markdown, waiting audio, playback range and interruption', async ({ p
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('echo ok');
   await page.getByRole('button', { name: '重播', exact: true }).click();
   await expect.poll(() => voice.requests.some(event => event.type === 'say' && event.turn > turn)).toBeTruthy();
-  await page.getByRole('button', { name: '打断', exact: true }).click();
+  await page.getByRole('button', { name: '停播', exact: true }).click();
   await expect(page.locator('.entry.user')).toHaveCount(1);
+});
+
+test('relay keeps work through stop speaking, steer, hangup and reload', async ({ page }) => {
+  const id = 'conv_' + 'a'.repeat(32);
+  const original = 'resp_' + 'a'.repeat(32);
+  const successor = 'resp_' + 'b'.repeat(32);
+  let workId = 'live-one';
+  let log = [];
+  let active = false;
+  const viewers = new Set();
+  const commands = [];
+  const persisted = [];
+  const upstream = (type, fields) => {
+    const event = { type, ...fields, turnline_turn: workId, turnline_cursor: log.length + 1 };
+    log.push(event);
+    for (const viewer of viewers) viewer.send(JSON.stringify(event));
+    if (['response.completed', 'response.cancelled'].includes(type)) active = false;
+  };
+  const created = responseId => upstream('response.created', { response: { id: responseId, status: 'in_progress' } });
+
+  await page.route('**/api/session', route => route.fulfill({ json: { connection: 'ready', relay: true } }));
+  await page.route('**/api/pipiclaw/v1/conversations**', route => {
+    const { pathname, searchParams } = new URL(route.request().url());
+    if (pathname.endsWith('/items')) {
+      return route.fulfill({ json: { data: searchParams.get('order') === 'desc' ? [...persisted].reverse() : persisted,
+        has_more: false } });
+    }
+    return route.fulfill({ json: { id } });
+  });
+  await page.routeWebSocket('**/api/pipiclaw/v1/responses', connection => {
+    connection.onClose(() => viewers.delete(connection));
+    connection.onMessage(raw => {
+      const command = JSON.parse(raw);
+      commands.push(command);
+      viewers.add(connection);
+      switch (command.type) {
+        case 'response.create':
+          workId = commands.length === 1 ? 'live-one' : 'live-two';
+          log = [];
+          active = true;
+          persisted.push({
+            id: 'input_' + commands.length, type: 'message', role: 'user', status: 'completed',
+            content: [{ type: 'input_text', text: command.input }],
+          });
+          created(commands.length === 1 ? original : successor);
+          break;
+        case 'response.subscribe':
+          if (active) {
+            for (const event of log.slice(command.after ?? 0)) connection.send(JSON.stringify(event));
+          } else connection.send(JSON.stringify({ type: 'turnline.idle' }));
+          break;
+        case 'response.steer':
+          upstream('response.steer.accepted', { turnline_request_id: command.request_id });
+          upstream('response.incomplete', { response: { id: original, incomplete_details: { reason: 'steered' } } });
+          created(successor);
+          break;
+        case 'response.cancel':
+          upstream('response.cancelled', { response: { id: successor, status: 'cancelled' } });
+          break;
+      }
+    });
+  });
+  const voice = await fixture(page, undefined, 'relay');
+  await startCall(page);
+  await send(page, '检查发布日志');
+  const first = { ...conversation, id: 'first_answer' };
+  await expect.poll(() => commands.length).toBe(1);
+  upstream('response.output_item.added', { output_index: 0, item: first });
+  upstream('response.output_text.delta', { output_index: 0, delta: '正在检查发布日志。' });
+  await expect.poll(() => voice.requests.some(event => event.type === 'say')).toBe(true);
+  playSpeech(voice, voice.requests.find(event => event.type === 'say'));
+  await expect(page.locator('#status')).toHaveText('正在播报');
+  await page.getByRole('button', { name: '停播', exact: true }).click();
+  await expect(page.locator('#work-status > details > summary')).toContainText('已停播');
+  const said = voice.requests.filter(event => event.type === 'say').length;
+  upstream('response.output_text.delta', { output_index: 0, delta: '这部分只留在记录里。' });
+  await expect(page.locator('.entry.assistant .content')).toContainText('只留在记录里');
+  expect(voice.requests.filter(event => event.type === 'say')).toHaveLength(said);
+  expect(commands).toHaveLength(1);
+
+  await send(page, '只查今天');
+  await expect.poll(() => commands.at(-1)?.type).toBe('response.steer');
+  expect(commands.at(-1).previous_response_id).toBe(original);
+  await expect(page.getByText('已插入正在进行的工作')).toBeVisible();
+  const tool = { id: 'mcp_test', type: 'mcp_call', name: 'subagent_inline', arguments: '{"task":"核对发布日志"}' };
+  upstream('response.output_item.added', { output_index: 0, item: { ...tool, status: 'in_progress' } });
+  await expect(page.locator('#work-status > details > summary')).toContainText('核对发布日志');
+  await page.getByRole('button', { name: '挂断' }).click();
+  await expect(page.getByRole('button', { name: '停止工作' })).toBeVisible();
+  expect(commands.map(command => command.type)).toEqual(['response.create', 'response.steer']);
+
+  await page.reload();
+  await expect.poll(() => commands.at(-1)?.type).toBe('response.subscribe');
+  await expect(page.locator('#work-status > details > summary')).toContainText('核对发布日志');
+  const final = {
+    ...conversation, id: 'final_answer', status: 'completed',
+    content: [{ type: 'output_text', text: '今天的发布日志已核对。' }],
+  };
+  persisted.push(final);
+  upstream('response.output_item.done', { output_index: 0, item: { ...tool, status: 'completed', output: '核对完成' } });
+  upstream('response.output_item.done', { output_index: 1, item: final });
+  upstream('response.completed', { response: { id: successor, output: [{ ...tool, status: 'completed' }, final] } });
+  await expect(page.getByText('今天的发布日志已核对。', { exact: true })).toHaveCount(1);
+  await expect(page.locator('#work-status > details > summary')).toContainText('已完成');
+  expect(commands.filter(command => command.type === 'response.create')).toHaveLength(1);
+
+  await send(page, '继续检查');
+  await expect.poll(() => commands.filter(command => command.type === 'response.create').length).toBe(2);
+  await page.getByRole('button', { name: '停止工作' }).click();
+  await expect.poll(() => commands.at(-1)?.type).toBe('response.cancel');
+  await expect(page.locator('#work-status > details > summary')).toContainText('已停止工作');
 });
 
 test('minimum speech duration is saved and sent when the voice connection opens', async ({ page }) => {

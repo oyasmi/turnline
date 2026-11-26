@@ -5,7 +5,6 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager, closing
 import hashlib
 import ipaddress
-import json
 import os
 from pathlib import Path
 import re
@@ -15,23 +14,21 @@ from time import time
 from urllib.parse import urlsplit
 
 from anyio import CancelScope
-from fastapi import WebSocketDisconnect
 import httpx
 from starlette.responses import JSONResponse, StreamingResponse
-from websockets.asyncio.client import unix_connect
-from websockets.exceptions import ConnectionClosed
 
 from .http_support import ClientStream, error, read_json
+from .work_relay import RESPONSE_ID, WorkHub, relay_socket
 
 SESSION_SECONDS = 365 * 24 * 3600
 RENEW_WINDOW = 30 * 24 * 3600
 CONVERSATION_ID = re.compile(r"conv_[a-f0-9]{32}")
-RESPONSE_ID = re.compile(r"resp_[a-f0-9]{32}")
-STREAM_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 CONVERSATION_PAGE_SIZE = 12
 MAX_TRACKED_RESPONSES = 512
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 UNAVAILABLE = "Turnline 无法连接 Pipiclaw，请检查服务端连接。"
+PASSCODE_OWNER = "passcode-owner"
+CONVERSATION_NOT_FOUND = "找不到此会话。请开始新对话。"
 
 
 def digest(token):
@@ -77,7 +74,8 @@ def normalize_origin(value):
 
 
 class SessionStore:
-    def __init__(self, directory):
+    def __init__(self, directory, *, share_authenticated=False):
+        self.share_authenticated = share_authenticated
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = directory / "devices.sqlite3"
         fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
@@ -90,11 +88,24 @@ class SessionStore:
                     created_at INTEGER NOT NULL,
                     last_seen INTEGER NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS conversations_by_device ON conversations (device);
             """)
+            # Serialize schema inspection and migration while retaining history order.
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
+                if "device" in columns:
+                    db.execute("ALTER TABLE conversations RENAME TO legacy_conversations")
+                db.execute("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, owner TEXT NOT NULL)")
+                if "device" in columns:
+                    db.execute("""
+                        INSERT INTO conversations (rowid, id, owner)
+                        SELECT c.rowid, c.id, CASE WHEN a.device IS NOT NULL OR d.expires = 0 THEN ? ELSE c.device END
+                        FROM legacy_conversations c
+                        JOIN devices d ON d.id = c.device
+                        LEFT JOIN authenticated_devices a ON a.device = c.device
+                    """, (PASSCODE_OWNER,))
+                    db.execute("DROP TABLE legacy_conversations")
+                db.execute("CREATE INDEX IF NOT EXISTS conversations_by_owner ON conversations (owner)")
 
     def open(self):
         db = sqlite3.connect(self.path, timeout=2)
@@ -193,11 +204,18 @@ class SessionStore:
                 row = db.execute("SELECT 1 FROM devices WHERE id = ? AND expires > ?", (identity, int(time()))).fetchone()
         return identity if row else None
 
+    def _owner(self, db, device):
+        if self.share_authenticated and db.execute(
+            "SELECT 1 FROM authenticated_devices WHERE device = ?", (device,),
+        ).fetchone():
+            return PASSCODE_OWNER
+        return device
+
     def own(self, conversation, device):
         with closing(self.open()) as db, db:
             result = db.execute(
-                "INSERT INTO conversations SELECT ?, id FROM devices WHERE id = ? AND expires > ?",
-                (conversation, device, int(time())),
+                "INSERT INTO conversations SELECT ?, ? FROM devices WHERE id = ? AND expires > ?",
+                (conversation, self._owner(db, device), device, int(time())),
             )
             return bool(result.rowcount)
 
@@ -205,25 +223,27 @@ class SessionStore:
         if not isinstance(conversation, str) or not CONVERSATION_ID.fullmatch(conversation):
             return False
         with closing(self.open()) as db:
-            return db.execute("SELECT 1 FROM conversations WHERE id = ? AND device = ?",
-                              (conversation, device)).fetchone() is not None
+            return db.execute("SELECT 1 FROM conversations WHERE id = ? AND owner = ?",
+                              (conversation, self._owner(db, device))).fetchone() is not None
 
     def forget(self, conversation, device):
         if not isinstance(conversation, str) or not CONVERSATION_ID.fullmatch(conversation):
             return False
         with closing(self.open()) as db, db:
-            result = db.execute("DELETE FROM conversations WHERE id = ? AND device = ?", (conversation, device))
+            result = db.execute("DELETE FROM conversations WHERE id = ? AND owner = ?",
+                                (conversation, self._owner(db, device)))
             return bool(result.rowcount)
 
     def list_conversations(self, device, after=None):
         with closing(self.open()) as db:
+            owner = self._owner(db, device)
             rows = db.execute("""
                 SELECT id FROM conversations
-                WHERE device = ? AND (
-                    ? IS NULL OR rowid < (SELECT rowid FROM conversations WHERE id = ? AND device = ?)
+                WHERE owner = ? AND (
+                    ? IS NULL OR rowid < (SELECT rowid FROM conversations WHERE id = ? AND owner = ?)
                 )
                 ORDER BY rowid DESC LIMIT ?
-            """, (device, after, after, device, CONVERSATION_PAGE_SIZE + 1)).fetchall()
+            """, (owner, after, after, owner, CONVERSATION_PAGE_SIZE + 1)).fetchall()
         return {"data": [row[0] for row in rows[:CONVERSATION_PAGE_SIZE]],
                 "has_more": len(rows) > CONVERSATION_PAGE_SIZE}
 
@@ -244,21 +264,8 @@ def _clean_metadata(value):
     return cleaned
 
 
-def _ws_error(code, message, status=400, stream_id=None):
-    payload = {
-        "type": "error",
-        "status": status,
-        "error": {"type": "invalid_request_error" if status < 500 else "server_error",
-                  "code": code, "message": message, "param": None},
-    }
-    if stream_id:
-        payload["stream_id"] = stream_id
-    return json.dumps(payload, ensure_ascii=False)
-
-
 class Pipiclaw:
     def __init__(self, socket_path, sessions):
-        self.socket_path = Path(socket_path)
         self.sessions = sessions
         self._responses = OrderedDict()
         self.client = httpx.AsyncClient(
@@ -267,6 +274,11 @@ class Pipiclaw:
             timeout=httpx.Timeout(90, connect=5, pool=5),
             trust_env=False,
         )
+        self.work = WorkHub(socket_path, self.client, UNAVAILABLE)
+
+    async def close(self):
+        await self.work.close()
+        await self.client.aclose()
 
     def _track_response(self, response_id, device):
         if not isinstance(response_id, str) or not RESPONSE_ID.fullmatch(response_id):
@@ -329,7 +341,7 @@ class Pipiclaw:
 
     async def get_conversation(self, conversation, device):
         if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-            return error("找不到此设备的会话。请开始新对话。", 404)
+            return error(CONVERSATION_NOT_FOUND, 404)
         try:
             upstream = await self.client.get(f"/conversations/{conversation}")
             return self.failure(upstream) or JSONResponse(upstream.json())
@@ -338,7 +350,7 @@ class Pipiclaw:
 
     async def update_conversation(self, request, conversation, device):
         if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-            return error("找不到此设备的会话。请开始新对话。", 404)
+            return error(CONVERSATION_NOT_FOUND, 404)
         candidate = await read_json(request)
         cleaned = _clean_metadata(candidate.get("metadata")) if isinstance(candidate, dict) else None
         if cleaned is None:
@@ -351,7 +363,7 @@ class Pipiclaw:
 
     async def delete_conversation(self, conversation, device):
         if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-            return error("找不到此设备的会话。", 404)
+            return error(CONVERSATION_NOT_FOUND, 404)
         try:
             upstream = await self.client.delete(f"/conversations/{conversation}")
         except httpx.RequestError:
@@ -365,7 +377,7 @@ class Pipiclaw:
 
     async def conversation_items(self, request, conversation, device):
         if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-            return error("找不到此设备的会话。请开始新对话。", 404)
+            return error(CONVERSATION_NOT_FOUND, 404)
         params = {key: request.query_params[key] for key in ("after", "limit", "order") if key in request.query_params}
         try:
             upstream = await self.client.get(f"/conversations/{conversation}/items", params=params)
@@ -379,7 +391,7 @@ class Pipiclaw:
             return error("请发送有效的对话内容。")
         conversation, message = candidate.get("conversation"), candidate.get("input")
         if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-            return error("找不到此设备的会话。请开始新对话。", 404)
+            return error(CONVERSATION_NOT_FOUND, 404)
         if not isinstance(message, str) or not 0 < len(message.strip()) <= 12_000:
             return error("请发送 1 至 12000 字的消息。")
         body = {"conversation": conversation, "model": "pipiclaw", "input": message, "stream": True}
@@ -474,98 +486,8 @@ class Pipiclaw:
         except (httpx.RequestError, ValueError):
             return error(UNAVAILABLE, 503)
 
-    async def responses_ws(self, ws, device):
-        await ws.accept()
-        try:
-            upstream = await unix_connect(str(self.socket_path), uri="ws://localhost/v1/responses",
-                                          max_size=2 * 1024 * 1024, open_timeout=5)
-        except OSError:
-            await ws.send_text(_ws_error("upstream_unavailable", UNAVAILABLE, 503))
-            await ws.close(code=1011)
-            return
+    async def responses_ws(self, ws, device, authorize):
+        async def owns(conversation):
+            return await asyncio.to_thread(self.sessions.owns, conversation, device)
 
-        async def from_browser():
-            while True:
-                raw = await ws.receive_text()
-                try:
-                    event = json.loads(raw)
-                except ValueError:
-                    await ws.send_text(_ws_error("invalid_json", "消息必须是 JSON 对象。"))
-                    continue
-                if not isinstance(event, dict):
-                    await ws.send_text(_ws_error("invalid_json", "消息必须是 JSON 对象。"))
-                    continue
-                kind = event.get("type")
-                stream_id = event.get("stream_id")
-                if stream_id is not None and (not isinstance(stream_id, str) or not STREAM_ID.fullmatch(stream_id)):
-                    await ws.send_text(_ws_error("invalid_stream_id", "无效的 stream_id。"))
-                    continue
-                if kind == "response.create":
-                    conversation = event.get("conversation")
-                    message = event.get("input")
-                    if not await asyncio.to_thread(self.sessions.owns, conversation, device):
-                        await ws.send_text(_ws_error("not_found", "找不到此设备的会话。", 404, stream_id))
-                        continue
-                    if not isinstance(message, str) or not 0 < len(message.strip()) <= 12_000:
-                        await ws.send_text(_ws_error("invalid_value", "请发送 1 至 12000 字的消息。", 400, stream_id))
-                        continue
-                    forwarded = {
-                        "type": "response.create",
-                        "model": "pipiclaw",
-                        "conversation": conversation,
-                        "input": message,
-                    }
-                    instructions = event.get("instructions")
-                    if isinstance(instructions, str) and len(instructions) <= 8_000:
-                        forwarded["instructions"] = instructions
-                    if stream_id:
-                        forwarded["stream_id"] = stream_id
-                    await upstream.send(json.dumps(forwarded, ensure_ascii=False))
-                elif kind == "response.steer":
-                    target = event.get("previous_response_id")
-                    message = event.get("input")
-                    if not isinstance(target, str) or not RESPONSE_ID.fullmatch(target):
-                        await ws.send_text(_ws_error("invalid_value", "无效的 previous_response_id。", 400, stream_id))
-                        continue
-                    if not isinstance(message, str) or not 0 < len(message.strip()) <= 12_000:
-                        await ws.send_text(_ws_error("invalid_value", "请发送 1 至 12000 字的消息。", 400, stream_id))
-                        continue
-                    forwarded = {"type": "response.steer", "previous_response_id": target, "input": message}
-                    if stream_id:
-                        forwarded["stream_id"] = stream_id
-                    await upstream.send(json.dumps(forwarded, ensure_ascii=False))
-                elif kind == "response.cancel":
-                    forwarded = {"type": "response.cancel"}
-                    target = event.get("response_id")
-                    if target is not None:
-                        if not isinstance(target, str) or not RESPONSE_ID.fullmatch(target):
-                            await ws.send_text(_ws_error("invalid_value", "无效的 response_id。", 400, stream_id))
-                            continue
-                        forwarded["response_id"] = target
-                    await upstream.send(json.dumps(forwarded, ensure_ascii=False))
-                else:
-                    await ws.send_text(_ws_error("invalid_value", "不支持的 WebSocket 事件类型。", 400, stream_id))
-
-        async def from_upstream():
-            async for message in upstream:
-                if isinstance(message, str):
-                    await ws.send_text(message)
-                else:
-                    await ws.send_bytes(message)
-
-        try:
-            async with upstream:
-                tasks = [asyncio.create_task(from_browser()), asyncio.create_task(from_upstream())]
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    exc = task.exception()
-                    if exc and not isinstance(exc, (WebSocketDisconnect, ConnectionClosed, asyncio.CancelledError)):
-                        raise exc
-        finally:
-            try:
-                await ws.close()
-            except Exception:
-                pass
+        await relay_socket(ws, self.work, owns, authorize)

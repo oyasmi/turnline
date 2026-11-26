@@ -31,17 +31,30 @@ function pipiclawFixture() {
   const json = (response, body, status = 200) => {
     response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
   };
+  async function readBody(incoming) {
+    let body = '';
+    for await (const chunk of incoming) body += chunk;
+    return JSON.parse(body);
+  }
   async function respond(incoming, response) {
     const url = new URL(incoming.url, 'http://localhost');
     if (url.pathname === '/v1/models/pipiclaw') return json(response, { id: 'pipiclaw' });
     if (url.pathname === '/v1/conversations' && incoming.method === 'POST') {
       incoming.resume();
       const id = 'conv_' + (conversations.size + 1).toString(16).padStart(32, '0');
-      conversations.set(id, []);
+      conversations.set(id, { items: [], metadata: {} });
       return json(response, { id });
     }
+    const match = /^\/v1\/conversations\/(conv_[a-f0-9]{32})$/.exec(url.pathname);
+    if (match) {
+      const id = match[1];
+      const conversation = conversations.get(id);
+      if (!conversation) return json(response, { error: { message: 'Unknown conversation' } }, 404);
+      if (incoming.method === 'POST') Object.assign(conversation.metadata, (await readBody(incoming)).metadata);
+      return json(response, { id, metadata: conversation.metadata });
+    }
     if (url.pathname.endsWith('/items')) {
-      const items = conversations.get(url.pathname.split('/')[3]);
+      const items = conversations.get(url.pathname.split('/')[3])?.items;
       if (!items) return json(response, { error: { message: 'Unknown conversation' } }, 404);
       const ordered = url.searchParams.get('order') === 'desc' ? items.slice().reverse() : items;
       const after = url.searchParams.get('after');
@@ -50,10 +63,9 @@ function pipiclawFixture() {
       return json(response, { data: remaining.slice(0, limit), has_more: remaining.length > limit });
     }
     if (url.pathname !== '/v1/responses') return json(response, {}, 404);
-    let body = '';
-    for await (const chunk of incoming) body += chunk;
-    const request = JSON.parse(body);
-    const items = conversations.get(request.conversation);
+    if (incoming.method !== 'POST') return json(response, {}, 426);
+    const request = await readBody(incoming);
+    const items = conversations.get(request.conversation)?.items;
     if (!items) return json(response, { error: { message: 'Unknown conversation' } }, 404);
     requests.push(request);
     const input = { id: 'user_' + requests.length, type: 'message', role: 'user', status: 'completed',
@@ -198,6 +210,7 @@ try {
   async function verifyHistory(fixture, firstTitle, secondTitle) {
     const firstId = fixture.requests[0].conversation;
     await page.getByRole('button', { name: '新对话' }).click();
+    await page.getByRole('button', { name: '确认清空？' }).click();
     await page.reload();
     await page.locator('#empty').waitFor({ state: 'visible' });
     await sendText(secondTitle);
@@ -213,17 +226,17 @@ try {
   }
 
   await page.goto(first);
-  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await waitFor('#backend-label', 'PipiClaw 已连接');
   await page.getByRole('button', { name: '通话设置' }).click();
   await page.getByRole('link', { name: '浏览器直连' }).click();
   await waitFor('#backend-label', '等待设置');
   assert.equal(new URL(page.url()).pathname, '/direct');
   assert.equal(await page.evaluate(() => isSecureContext), true);
   await page.getByRole('button', { name: '设置直连' }).click();
-  await page.getByLabel('Pipiclaw 地址').fill(pipiclawUrl);
-  await page.getByLabel('Pipiclaw Key', { exact: true }).fill(fixtureKey);
+  await page.getByLabel('PipiClaw 地址').fill(pipiclawUrl);
+  await page.getByLabel('PipiClaw Key', { exact: true }).fill(fixtureKey);
   await page.getByRole('button', { name: '测试并连接' }).click();
-  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await waitFor('#backend-label', 'PipiClaw 已连接');
   await page.getByRole('button', { name: '开始通话' }).click();
   await waitFor('#status', '正在聆听');
   await page.getByRole('textbox', { name: '文字消息' }).fill('测试浏览器直连');
@@ -232,7 +245,7 @@ try {
   await waitFor('#metric-audio', 'ms');
   await page.getByRole('button', { name: '挂断' }).click();
   await page.reload();
-  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await waitFor('#backend-label', 'PipiClaw 已连接');
   await waitFor('.entry.assistant .content', '这是浏览器直连的回复');
   await page.setViewportSize({ width: 360, height: 640 });
   await verifyHistory(directFixture, '测试浏览器直连', '另一条浏览器直连会话');
@@ -240,11 +253,11 @@ try {
   assert.ok(!await page.evaluate(key => Object.values(localStorage).some(value => value.includes(key)), fixtureKey));
   await page.getByRole('button', { name: '通话设置' }).click();
   await page.getByRole('link', { name: '服务端中转' }).click();
-  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await waitFor('#backend-label', 'PipiClaw 已连接');
   assert.equal(new URL(page.url()).pathname, '/');
 
   await page.goto(second);
-  await waitFor('#backend-label', 'Pipiclaw 已连接');
+  await waitFor('#backend-label', 'PipiClaw 已连接');
   await sendText('测试同机中转');
   await verifyHistory(relayFixture, '测试同机中转', '另一条同机中转会话');
   const cookies = await page.context().cookies(second);

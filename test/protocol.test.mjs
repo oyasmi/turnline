@@ -220,6 +220,12 @@ test('ResponseTurn surfaces tool labels, pipiclaw_failure, pipiclaw_level, usage
     item: { id: 'mcp_1', type: 'mcp_call', name: 'bash', status: 'in_progress' },
   });
   assert.deepEqual(toolStates.at(-1), [true, '正在执行命令']);
+  turn.event({
+    type: 'response.mcp_call_arguments.done', output_index: 0, item_id: 'mcp_1',
+    arguments: '{"command":"pnpm test"}',
+  });
+  assert.deepEqual(toolStates.at(-1), [true, '正在执行命令 · pnpm test']);
+  turn.event({ type: 'response.mcp_call.failed', output_index: 0, item_id: 'mcp_1' });
 
   turn.event({
     type: 'response.output_item.done', sequence_number: 2, output_index: 0,
@@ -227,6 +233,10 @@ test('ResponseTurn surfaces tool labels, pipiclaw_failure, pipiclaw_level, usage
   });
   assert.deepEqual(toolStates.at(-1), [false, undefined]);
   assert.deepEqual(notices, [['error', '命令被安全守卫拦截。']]);
+  assert.equal(turn.activity.count, 1);
+  assert.equal(turn.activity.details[0].output, '命令被安全守卫拦截。');
+  turn.event({ type: 'response.reasoning_summary_text.done', output_index: 1, text: '先检查失败记录。' });
+  assert.equal(turn.activity.reasoning.get(1), '先检查失败记录。');
 
   // Steered response ends incomplete without throwing and advances item generation.
   assert.equal(turn.event({

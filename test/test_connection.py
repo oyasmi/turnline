@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,11 +7,12 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 import httpx
 from starlette.responses import JSONResponse, StreamingResponse
 from websockets.asyncio.client import connect as ws_connect
 
+from turnline.auth import PasscodeVerifier
 from turnline.connection import SessionStore, digest, normalize_origin
 from turnline.server import create_app
 from support import running
@@ -45,7 +47,7 @@ class SessionStoreTest(unittest.TestCase):
             try:
                 with db:
                     db.execute("INSERT INTO devices VALUES (?, 1)", (identity,))
-                    db.execute("INSERT INTO conversations VALUES (?, ?)", (CONVERSATION, identity))
+                    db.execute("INSERT INTO conversations (id, owner) VALUES (?, ?)", (CONVERSATION, identity))
             finally:
                 db.close()
             self.assertIsNone(store.identity(token))
@@ -71,6 +73,38 @@ class SessionStoreTest(unittest.TestCase):
                              {"data": ids[1::-1], "has_more": False})
             self.assertEqual(store.list_conversations(second), {"data": [OTHER], "has_more": False})
             self.assertEqual(store.list_conversations(first, OTHER), {"data": [], "has_more": False})
+
+    def test_legacy_owner_migration_keeps_anonymous_history_private(self):
+        with TemporaryDirectory() as directory:
+            state = Path(directory)
+            store = SessionStore(state)
+            authenticated, first = store.create_authenticated(3_600)
+            anonymous = store.identity(store.start(None))
+            revoked_token, revoked = store.create_authenticated(3_600)
+            store.revoke_token(revoked_token)
+            previous = "conv_" + "e" * 32
+            with closing(sqlite3.connect(store.path)) as db, db:
+                db.executescript("""
+                    DROP TABLE conversations;
+                    CREATE TABLE conversations (
+                        id TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX conversations_by_device ON conversations (device);
+                """)
+                db.executemany("INSERT INTO conversations VALUES (?, ?)", (
+                    (previous, revoked), (CONVERSATION, first), (OTHER, anonymous),
+                ))
+
+            store = SessionStore(state, share_authenticated=True)
+            store.revoke_token(authenticated)
+            replacement, new_device = store.create_authenticated(3_600)
+            self.assertIsNone(store.identity(authenticated, require_auth=True))
+            self.assertEqual(store.identity(replacement, require_auth=True), new_device)
+            self.assertEqual(store.list_conversations(new_device)["data"], [CONVERSATION, previous])
+            self.assertEqual(store.list_conversations(anonymous)["data"], [OTHER])
+            self.assertFalse(store.owns(OTHER, new_device))
+            self.assertFalse(store.owns(CONVERSATION, anonymous))
+            self.assertEqual(SessionStore(state).list_conversations(new_device)["data"], [])
 
     def test_public_url_requires_tls_for_a_nonloopback_browser(self):
         self.assertEqual(normalize_origin("https://192.168.1.5:443/"), "https://192.168.1.5")
@@ -302,12 +336,16 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await client.get(PREFIX + "/conversations")).json(),
                                          {"data": [], "has_more": False})
 
-    async def test_relay_websocket_forwards_create_steer_cancel_and_enforces_ownership(self):
+    async def test_relay_websocket_survives_detach_and_confirms_stop_across_devices(self):
         with TemporaryDirectory() as directory:
             state = Path(directory)
             path = state / "pipiclaw.sock"
             received = []
+            allow_completion = asyncio.Event()
+            disconnections = asyncio.Queue()
+            status = {}
             upstream = FastAPI()
+            successor = "resp_" + "b" * 32
 
             @upstream.get("/v1/models/pipiclaw")
             async def model():
@@ -317,73 +355,126 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
             async def create():
                 return {"id": CONVERSATION}
 
+            @upstream.get("/v1/responses/{response_id}")
+            async def retrieve(response_id: str):
+                return {"id": response_id, "status": status[response_id]}
+
             @upstream.websocket("/v1/responses")
             async def ws_upstream(ws: WebSocket):
                 await ws.accept()
+                completing = None
+
+                async def emit(kind, **fields):
+                    await ws.send_text(json.dumps({"type": kind, **fields}))
+
+                async def complete():
+                    await allow_completion.wait()
+                    await emit("response.completed", response={
+                        "id": successor, "status": "completed", "output": [],
+                    })
+
                 try:
                     while True:
-                        event = json.loads(await ws.receive_text())
+                        event = await ws.receive_json()
                         received.append(event)
                         if event["type"] == "response.create":
-                            await ws.send_text(json.dumps({
-                                "type": "response.created", "sequence_number": 0,
-                                "response": {"id": RESPONSE, "status": "in_progress"},
-                            }))
+                            status[RESPONSE] = "in_progress"
+                            await emit("response.created", response={"id": RESPONSE, "status": "in_progress"})
                         elif event["type"] == "response.steer":
-                            await ws.send_text(json.dumps({
-                                "type": "response.steer.accepted", "sequence_number": 1,
-                                "steer": {"id": "steer_1", "previous_response_id": RESPONSE},
-                            }))
-                            await ws.send_text(json.dumps({
-                                "type": "response.incomplete", "sequence_number": 2,
-                                "response": {"id": RESPONSE, "status": "incomplete",
-                                             "incomplete_details": {"reason": "steered"}},
-                            }))
+                            # The original can complete before the steer acknowledgment.
+                            # An accepted steer in this case runs as a follow-up.
+                            await emit("response.completed", response={"id": RESPONSE, "status": "completed"})
+                            await emit("response.steer.accepted", steer={"previous_response_id": RESPONSE})
+                            status[successor] = "in_progress"
+                            await emit("response.created", response={"id": successor, "status": "in_progress"})
+                            completing = asyncio.create_task(complete())
                         elif event["type"] == "response.cancel":
-                            await ws.send_text(json.dumps({
-                                "type": "response.cancelled", "sequence_number": 3,
-                                "response": {"id": RESPONSE, "status": "cancelled"},
-                            }))
-                except Exception:
-                    pass
+                            status[event["response_id"]] = "cancelled"
+                            # PipiClaw sends no cancellation event.
+                except WebSocketDisconnect:
+                    disconnections.put_nowait(True)
+                finally:
+                    if completing:
+                        completing.cancel()
+                        await asyncio.gather(completing, return_exceptions=True)
+
+            async def receive(ws):
+                return json.loads(await asyncio.wait_for(ws.recv(), 3))
 
             async with running(upstream, uds=path):
+                passcode = "shared-test-passcode"
                 with patch("turnline.server.SpeechModels"):
-                    app = create_app(socket_path=path, state_dir=state / "state")
-                    async with running(app) as origin, httpx.AsyncClient(base_url=origin, timeout=5) as client:
-                        headers = {"Origin": origin}
-                        session = await client.get("/api/session")
-                        cookie = session.headers["set-cookie"].split(";", 1)[0]
-                        await client.post(PREFIX + "/conversations", headers=headers)
+                    app = create_app(
+                        socket_path=path, state_dir=state / "state", auth_mode="passcode",
+                        passcode_verifier=PasscodeVerifier.from_plaintext(passcode),
+                    )
+                async with (
+                    running(app) as origin,
+                    httpx.AsyncClient(base_url=origin, timeout=5) as first,
+                    httpx.AsyncClient(base_url=origin, timeout=5) as second,
+                ):
+                    headers = {"Origin": origin}
+                    url = origin.replace("http://", "ws://", 1) + PREFIX + "/responses"
 
-                        ws_origin = origin.replace("http://", "ws://", 1) + PREFIX + "/responses"
-                        async with ws_connect(ws_origin, additional_headers={"Origin": origin, "Cookie": cookie}) as ws:
-                            # Rejects conversation not owned by this device.
-                            await ws.send(json.dumps({
-                                "type": "response.create", "conversation": OTHER, "input": "越权",
-                            }))
-                            err = json.loads(await ws.recv())
-                            self.assertEqual(err["type"], "error")
-                            self.assertEqual(err["status"], 404)
+                    async def login(client):
+                        response = await client.post("/api/auth/login", headers=headers, json={"passcode": passcode})
+                        self.assertEqual(response.status_code, 200)
+                        return response.headers["set-cookie"].split(";", 1)[0]
 
-                            # Valid create -> steer -> cancel flow.
-                            await ws.send(json.dumps({
-                                "type": "response.create", "conversation": CONVERSATION, "input": "查日志",
-                                "instructions": "简短回答",
-                            }))
-                            created_ev = json.loads(await ws.recv())
-                            self.assertEqual(created_ev["type"], "response.created")
+                    def connect(cookie):
+                        return ws_connect(url, additional_headers={**headers, "Cookie": cookie})
 
-                            await ws.send(json.dumps({
-                                "type": "response.steer", "previous_response_id": RESPONSE, "input": "只看今天",
-                            }))
-                            self.assertEqual(json.loads(await ws.recv())["type"], "response.steer.accepted")
-                            self.assertEqual(json.loads(await ws.recv())["type"], "response.incomplete")
+                    first_cookie, second_cookie = await login(first), await login(second)
+                    await first.post(PREFIX + "/conversations", headers=headers)
+                    self.assertEqual((await second.get(PREFIX + "/conversations")).json()["data"], [CONVERSATION])
+                    payload = {"type": "response.create", "conversation": CONVERSATION,
+                               "input": "查日志", "instructions": "先看今天"}
+                    async with connect(first_cookie) as ws:
+                        await ws.send(json.dumps({**payload, "conversation": OTHER}))
+                        self.assertEqual((await receive(ws))["status"], 404)
+                        await ws.send(json.dumps(payload))
+                        created = await receive(ws)
+                        self.assertEqual(created["type"], "response.created")
 
-                            await ws.send(json.dumps({"type": "response.cancel", "response_id": RESPONSE}))
-                            self.assertEqual(json.loads(await ws.recv())["type"], "response.cancelled")
+                    self.assertTrue(disconnections.empty(), "Closing the first browser must leave upstream connected")
+                    async with connect(second_cookie) as ws:
+                        await ws.send(json.dumps({"type": "response.subscribe", "conversation": CONVERSATION}))
+                        attachment = await receive(ws)
+                        self.assertEqual(attachment["type"], "turnline.attached")
+                        self.assertGreaterEqual(attachment["elapsed_ms"], created["turnline_elapsed_ms"])
+                        self.assertEqual(await receive(ws), created)
+                        await ws.send(json.dumps({
+                            "type": "response.steer", "previous_response_id": RESPONSE,
+                            "input": "只看今天", "request_id": "steer-1",
+                        }))
+                        self.assertEqual((await receive(ws))["turnline_request_id"], "steer-1")
+                        self.assertTrue((await receive(ws))["turnline_continues"])
+                        next_response = await receive(ws)
+                        self.assertEqual(next_response["response"]["id"], successor)
 
-                        self.assertEqual([item["type"] for item in received],
-                                         ["response.create", "response.steer", "response.cancel"])
-                        self.assertEqual(received[0]["model"], "pipiclaw")
-                        self.assertEqual(received[0]["instructions"], "简短回答")
+                    self.assertTrue(disconnections.empty())
+                    allow_completion.set()
+                    await asyncio.wait_for(disconnections.get(), 3)
+                    async with connect(second_cookie) as ws:
+                        await ws.send(json.dumps({
+                            "type": "response.subscribe", "conversation": CONVERSATION,
+                            "turn_id": created["turnline_turn"], "after": next_response["turnline_cursor"],
+                        }))
+                        self.assertEqual((await receive(ws))["type"], "turnline.attached")
+                        complete = await receive(ws)
+                        self.assertEqual(complete["type"], "response.completed")
+                        self.assertEqual(complete["response"]["id"], successor)
+
+                    await first.post("/api/auth/logout", headers=headers)
+                    async with connect(second_cookie) as ws:
+                        await ws.send(json.dumps(payload))
+                        self.assertEqual((await receive(ws))["type"], "response.created")
+                        await ws.send(json.dumps({"type": "response.cancel"}))
+                        cancelled = await receive(ws)
+                        self.assertEqual(cancelled["type"], "response.cancelled")
+                        self.assertEqual(cancelled["response"]["status"], "cancelled")
+
+                    self.assertEqual([item["type"] for item in received],
+                                     ["response.create", "response.steer", "response.create", "response.cancel"])
+                    self.assertEqual(received[0]["model"], "pipiclaw")
+                    self.assertEqual(received[0]["instructions"], "先看今天")

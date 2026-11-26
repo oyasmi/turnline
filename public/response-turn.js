@@ -1,26 +1,8 @@
 import { clock } from './audio.js';
 import { splitSpeech } from './chunker.js';
+import { WorkActivity } from './work-activity.js';
 
-const TOOL_LABELS = {
-  bash: '正在执行命令',
-  read: '正在读取文件',
-  write: '正在写入文件',
-  edit: '正在编辑文件',
-  grep: '正在检索内容',
-  glob: '正在查找文件',
-  find: '正在查找文件',
-  web_search: '正在搜索网页',
-  web_fetch: '正在读取网页',
-  memory_manage: '正在检索记忆',
-  session_search: '正在搜索历史',
-  subagent: '正在委派子任务',
-  event_manage: '正在管理事件',
-};
-
-export function describeTool(name) {
-  if (!name || typeof name !== 'string') return '正在查询';
-  return TOOL_LABELS[name] ?? '正在调用工具';
-}
+export { describeTool } from './work-activity.js';
 
 export class ResponseTurn {
   constructor(options, handlers) {
@@ -28,7 +10,7 @@ export class ResponseTurn {
     this.handlers = handlers;
     this.controller = new AbortController();
     this.items = new Map();
-    this.tools = new Map();
+    this.activity = new WorkActivity();
     this.heard = [];
     this.gaps = 0;
     this.ended = false;
@@ -57,7 +39,7 @@ export class ResponseTurn {
   }
 
   drain(entry, finish) {
-    if (!this.voice || entry.phase === 'commentary') return;
+    if (!this.voice || this.speechSuppressed || entry.phase === 'commentary') return;
     const offset = entry.text.length - entry.pendingSpeech.length;
     const split = splitSpeech(entry.pendingSpeech, finish, !this.firstSpeakable, true);
     entry.pendingSpeech = split.rest;
@@ -72,17 +54,21 @@ export class ResponseTurn {
   }
 
   output(key, item) {
-    this.handlers.track(item.id);
-    if (item.type === 'mcp_call') {
-      if (item.status === 'failed' && item.pipiclaw_failure) {
-        this.handlers.notice?.('error', item.pipiclaw_failure);
-      }
+    if (item.type === 'mcp_call' || item.type === 'function_call') {
+      this.updateTool(key, item);
       return;
     }
+    if (item.type === 'reasoning') {
+      this.activity.summary(item.id ?? key, item.summary?.map(part => part.text).join('\n'));
+      this.handlers.activity?.();
+      return;
+    }
+    this.handlers.track(item.id);
     if (item.type !== 'message' || item.role !== 'assistant') return;
     const entry = this.entry(key);
     if (entry.done) return;
     entry.done = true;
+    entry.id ??= item.id;
     entry.phase = item.phase ?? entry.phase;
     entry.level = item.pipiclaw_level ?? entry.level;
     if (entry.phase === 'commentary' && entry.spoken) entry.spokenAsCommentary = true;
@@ -96,18 +82,32 @@ export class ResponseTurn {
     this.drain(entry, true);
   }
 
-  latestToolLabel() {
-    let label;
-    for (const value of this.tools.values()) label = value;
-    return label;
+  updateTool(key, item) {
+    this.measure('firstTool');
+    const record = this.activity.tool(item.id ?? key, item, this.activityClock ?? clock());
+    if (item.pipiclaw_failure && !record.noticed) {
+      this.handlers.notice?.('error', item.pipiclaw_failure);
+      record.noticed = true;
+    }
+    this.updateActivity();
+  }
+
+  updateActivity() {
+    const running = this.activity.running;
+    this.handlers.tool(Boolean(running), running?.label);
+    this.handlers.activity?.();
   }
 
   event(event) {
+    this.activityClock = Number.isFinite(event.turnline_elapsed_ms)
+      ? this.startedAt + event.turnline_elapsed_ms
+      : clock();
     if (typeof event.sequence_number === 'number') this.lastSequence = event.sequence_number;
     const rawKey = event.output_index ?? event.item?.id ?? event.item_id;
     const key = this.generation && rawKey !== undefined ? `${this.generation}:${rawKey}` : rawKey;
     const item = event.item;
     if (event.type === 'response.created') {
+      this.responseStatus = event.response?.status;
       this.measure('created');
       if (event.response?.id) {
         this.responseId = event.response.id;
@@ -116,20 +116,19 @@ export class ResponseTurn {
     }
     if (event.type.startsWith('response.reasoning') || item?.type === 'reasoning') this.measure('reasoning');
     if (event.type === 'response.queued' || (event.type === 'response.created' && event.response?.status === 'queued')) {
+      this.responseStatus = 'queued';
       this.backendQueuedAt ??= clock();
     } else if (event.type === 'response.in_progress' || (event.type === 'response.created' && event.response?.status === 'in_progress')) {
+      this.responseStatus = 'in_progress';
       this.measure('backendQueue', this.backendQueuedAt === undefined ? 0 : clock() - this.backendQueuedAt);
     } else if (event.type === 'response.output_item.added') {
       if (item.type === 'mcp_call' || item.type === 'function_call') {
-        this.measure('firstTool');
-        const label = describeTool(item.name);
-        this.tools.set(key, label);
-        this.handlers.tool(true, label);
+        this.updateTool(key, item);
       }
       if (item.type === 'message' && item.role === 'assistant') {
         this.measure('firstMessage');
-        this.handlers.track(item.id);
         const entry = this.entry(key);
+        entry.id = item.id;
         entry.phase = item.phase;
         if (item.pipiclaw_level) entry.level = item.pipiclaw_level;
       }
@@ -139,26 +138,40 @@ export class ResponseTurn {
       entry.pendingSpeech += event.delta;
       this.update(entry);
       if (this.settings.reading === 'live') this.drain(entry, false);
+    } else if (event.type === 'response.mcp_call_arguments.done') {
+      this.updateTool(key, { id: event.item_id, arguments: event.arguments });
+    } else if (event.type.startsWith('response.mcp_call.')) {
+      this.updateTool(key, { id: event.item_id, status: event.type.split('.').at(-1) });
+    } else if (event.type === 'response.reasoning_summary_text.done') {
+      this.activity.summary(event.item_id ?? key, event.text);
+      this.handlers.activity?.();
     } else if (event.type === 'response.output_item.done') {
-      if (this.tools.delete(key)) this.handlers.tool(this.tools.size > 0, this.latestToolLabel());
       this.output(key, item);
-    } else if (event.type === 'response.completed') {
+    } else if (event.type === 'response.completed' || event.turnline_continues) {
       if (event.response?.usage) this.handlers.usage?.(event.response.usage);
-      for (const [index, final] of (event.response.output ?? []).entries()) {
+      for (const [index, final] of (event.response?.output ?? []).entries()) {
         this.output(this.generation ? `${this.generation}:${index}` : index, final);
       }
-      return true;
+      if (!event.turnline_continues) return true;
+      this.advance();
+      return false;
     } else if (event.type === 'response.incomplete' && event.response?.incomplete_details?.reason === 'steered') {
-      this.steered = true;
-      this.generation += 1;
-      this.tools.clear();
-      this.handlers.tool(false, undefined);
-      this.handlers.steered?.(event.response);
+      this.advance();
       return false;
     } else if (['error', 'response.failed', 'response.incomplete', 'response.cancelled'].includes(event.type)) {
-      throw new Error(event.error?.message ?? event.response?.error?.message ?? '后端在回复完成前结束了请求。');
+      const error = new Error(event.error?.message ?? event.message ?? event.response?.error?.message ?? '后端在回复完成前结束了请求。');
+      error.status = event.status;
+      error.code = event.error?.code;
+      throw error;
     }
     return false;
+  }
+
+  advance() {
+    this.generation += 1;
+    this.responseStatus = undefined;
+    this.activity.finish(this.activityClock ?? clock());
+    this.updateActivity();
   }
 
   get answer() {
